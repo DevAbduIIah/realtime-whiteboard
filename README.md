@@ -2,8 +2,6 @@
 
 A modern, real-time collaborative whiteboard application where multiple users can join rooms and draw together live. Built as a portfolio-quality full-stack project demonstrating real-time systems, WebSocket communication, and interactive canvas drawing.
 
-![Whiteboard Preview](https://via.placeholder.com/800x400?text=Collaborative+Whiteboard)
-
 ## Features
 
 - **Room-based Collaboration** - Create or join rooms with unique codes
@@ -170,7 +168,3 @@ npm start
 - Export canvas as image
 - User authentication
 - Touch/stylus support for tablets
-
-## License
-
-MIT
