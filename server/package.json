@@ -1,6 +1,7 @@
 {
   "name": "whiteboard-server",
   "version": "1.0.0",
+  "type": "module",
   "description": "Real-time whiteboard server",
   "main": "dist/index.js",
   "scripts": {

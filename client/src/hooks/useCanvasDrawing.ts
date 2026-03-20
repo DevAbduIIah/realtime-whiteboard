@@ -103,6 +103,7 @@ export function useCanvasDrawing({
     (e: MouseEvent<HTMLCanvasElement>) => {
       if (e.button !== 0) return;
 
+      console.log('Hook mouseDown:', { tool: drawingState.tool, isDrawingRef: isDrawingRef.current });
       isDrawingRef.current = true;
       const point = getCanvasPoint(e);
       currentPointsRef.current = [point];
@@ -113,8 +114,12 @@ export function useCanvasDrawing({
 
   const handleMouseMove = useCallback(
     (e: MouseEvent<HTMLCanvasElement>) => {
-      if (!isDrawingRef.current) return;
+      if (!isDrawingRef.current) {
+        console.log('Mouse move but not drawing');
+        return;
+      }
 
+      console.log('Hook mouseMove - drawing!');
       const canvas = canvasRef.current;
       if (!canvas) return;
 
@@ -124,12 +129,17 @@ export function useCanvasDrawing({
       const point = getCanvasPoint(e);
       currentPointsRef.current.push(point);
 
+      // Only handle brush and eraser tools
+      const tool = drawingState.tool === 'brush' || drawingState.tool === 'eraser'
+        ? drawingState.tool
+        : 'brush';
+
       const currentStroke: DrawStroke = {
         id: '',
         points: currentPointsRef.current,
         color: drawingState.color,
         size: drawingState.size,
-        tool: drawingState.tool,
+        tool,
         userId,
       };
 
@@ -145,12 +155,17 @@ export function useCanvasDrawing({
     isDrawingRef.current = false;
 
     if (currentPointsRef.current.length > 1) {
+      // Only handle brush and eraser tools
+      const tool = drawingState.tool === 'brush' || drawingState.tool === 'eraser'
+        ? drawingState.tool
+        : 'brush';
+
       const stroke: DrawStroke = {
         id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         points: [...currentPointsRef.current],
         color: drawingState.color,
         size: drawingState.size,
-        tool: drawingState.tool,
+        tool,
         userId,
       };
 

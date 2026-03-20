@@ -1,5 +1,5 @@
 import { io, Socket } from 'socket.io-client';
-import type { DrawStroke, CursorPosition, User, RoomState } from '../types';
+import type { DrawStroke, CursorPosition, User, RoomState, PresenceStatus, WhiteboardElement } from '../types';
 
 interface ServerToClientEvents {
   'room:joined': (data: { user: User; roomState: RoomState }) => void;
@@ -7,6 +7,9 @@ interface ServerToClientEvents {
   'room:user-left': (userId: string) => void;
   'draw:stroke': (stroke: DrawStroke) => void;
   'draw:clear': () => void;
+  'element:add': (element: WhiteboardElement) => void;
+  'element:update': (data: { elementId: string; updates: Partial<WhiteboardElement> }) => void;
+  'element:delete': (elementId: string) => void;
   'cursor:update': (cursor: CursorPosition) => void;
   'cursor:remove': (userId: string) => void;
   error: (message: string) => void;
@@ -17,7 +20,10 @@ interface ClientToServerEvents {
   'room:leave': () => void;
   'draw:stroke': (payload: { stroke: DrawStroke }) => void;
   'draw:clear': () => void;
-  'cursor:move': (payload: { x: number; y: number }) => void;
+  'element:add': (payload: { element: WhiteboardElement }) => void;
+  'element:update': (payload: { elementId: string; updates: Partial<WhiteboardElement> }) => void;
+  'element:delete': (payload: { elementId: string }) => void;
+  'cursor:move': (payload: { x: number; y: number; status?: PresenceStatus }) => void;
 }
 
 export type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -31,6 +37,11 @@ export function getSocket(): TypedSocket {
     socket = io(SOCKET_URL, {
       autoConnect: false,
       transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
     });
   }
   return socket;
