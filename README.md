@@ -2,8 +2,6 @@
 
 A modern, real-time collaborative whiteboard application where multiple users can join rooms and draw together live. Built as a portfolio-quality full-stack project demonstrating real-time systems, WebSocket communication, and interactive canvas drawing.
 
-![Whiteboard Preview](https://via.placeholder.com/800x400?text=Collaborative+Whiteboard)
-
 ## Features
 
 ### Core Collaboration
@@ -242,10 +240,6 @@ npm start
 - User authentication and private boards
 - Board templates and backgrounds
 - Touch/stylus support for tablets
-- Real-time video/audio chat
-- Layer management
-- Advanced text formatting
-- Collaborative cursors with typing indicators
 
 ## License
 
