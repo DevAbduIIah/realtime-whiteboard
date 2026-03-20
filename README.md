@@ -240,7 +240,3 @@ npm start
 - User authentication and private boards
 - Board templates and backgrounds
 - Touch/stylus support for tablets
-
-## License
-
-MIT
