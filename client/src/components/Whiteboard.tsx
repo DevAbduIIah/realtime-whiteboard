@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useEffect, useState } from "react";
 import { useSocket } from "../contexts/SocketContext";
-import { Canvas } from "./Canvas";
+import { Canvas, type CanvasHandle } from "./Canvas";
 import { Toolbar } from "./Toolbar";
 import { throttle } from "../utils/throttle";
 import { getUserColor, getUserInitials } from "../utils/userColors";
@@ -28,10 +28,14 @@ export function Whiteboard() {
     sendClear,
     sendCursorMove,
     sendElement,
+    updateElement,
+    deleteElement,
     cursors,
     connectionStatus,
     canUndo,
     canRedo,
+    captureHistorySnapshot,
+    commitCapturedHistory,
     undo,
     redo,
   } = useSocket();
@@ -48,7 +52,7 @@ export function Whiteboard() {
 
   const lastActivityRef = useRef<number>(Date.now());
   const presenceStatusRef = useRef<PresenceStatus>("online");
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = useRef<CanvasHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Keyboard shortcuts
@@ -80,6 +84,42 @@ export function Whiteboard() {
       }
 
       // Tool shortcuts (single letter without modifiers)
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (canvasRef.current?.deleteSelection()) {
+          e.preventDefault();
+          return;
+        }
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+        if (canvasRef.current?.copySelection()) {
+          e.preventDefault();
+          return;
+        }
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
+        if (canvasRef.current?.pasteClipboard()) {
+          e.preventDefault();
+          return;
+        }
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        if (canvasRef.current?.duplicateSelection()) {
+          e.preventDefault();
+          return;
+        }
+      }
+
+      if (e.key === "Escape") {
+        if (canvasRef.current?.hasSelection()) {
+          canvasRef.current.clearSelection();
+          e.preventDefault();
+          return;
+        }
+      }
+
       if (!e.ctrlKey && !e.metaKey && !e.altKey) {
         switch (e.key.toLowerCase()) {
           case "v":
@@ -146,16 +186,16 @@ export function Whiteboard() {
   }, []);
 
   const handleStrokeComplete = useCallback(
-    (stroke: DrawStroke) => {
-      sendStroke(stroke);
+    (stroke: DrawStroke, options?: { captureHistory?: boolean }) => {
+      sendStroke(stroke, options);
       presenceStatusRef.current = "online";
     },
     [sendStroke],
   );
 
   const handleElementAdd = useCallback(
-    (element: WhiteboardElement) => {
-      sendElement(element);
+    (element: WhiteboardElement, options?: { captureHistory?: boolean }) => {
+      sendElement(element, options);
     },
     [sendElement],
   );
@@ -205,10 +245,13 @@ export function Whiteboard() {
   }, [roomState, currentUser, showToastMessage]);
 
   const handleExportPNG = useCallback(async () => {
-    if (!canvasRef.current || !currentUser) return;
+    const canvasElement =
+      canvasRef.current?.getExportCanvas() ??
+      canvasRef.current?.getCanvasElement();
+    if (!canvasElement || !currentUser) return;
     setIsExporting(true);
     try {
-      await exportToPNG(canvasRef.current, `whiteboard-${currentUser.roomId}`);
+      await exportToPNG(canvasElement, `whiteboard-${currentUser.roomId}`);
       setShowExportMenu(false);
       showToastMessage("Exported as PNG");
     } catch (error) {
@@ -501,6 +544,10 @@ export function Whiteboard() {
             userId={currentUser.id}
             onStrokeComplete={handleStrokeComplete}
             onElementAdd={handleElementAdd}
+            onElementUpdate={updateElement}
+            onElementDelete={deleteElement}
+            onSelectionMutationStart={captureHistorySnapshot}
+            onSelectionMutationEnd={commitCapturedHistory}
             onDrawStart={handleDrawStart}
             onMouseMove={handleMouseMove}
             cursors={cursors}

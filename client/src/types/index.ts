@@ -55,7 +55,7 @@ export interface ShapeElement {
   userId: string;
 }
 
-export type WhiteboardElement = DrawStroke | TextElement | StickyElement | ShapeElement;
+export type WhiteboardElement = TextElement | StickyElement | ShapeElement;
 
 export type PresenceStatus = 'online' | 'drawing' | 'idle';
 
@@ -96,3 +96,17 @@ export interface HistoryState {
   present: WhiteboardElement[];
   future: WhiteboardElement[][];
 }
+
+export type SelectionMode = 'idle' | 'marquee' | 'dragging' | 'resizing';
+
+export type ResizeHandle =
+  | 'n'
+  | 'ne'
+  | 'e'
+  | 'se'
+  | 's'
+  | 'sw'
+  | 'w'
+  | 'nw'
+  | 'start'
+  | 'end';

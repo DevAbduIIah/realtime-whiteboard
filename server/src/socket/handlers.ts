@@ -145,6 +145,22 @@ export function setupSocketHandlers(io: TypedServer): void {
       socket.to(user.roomId).emit('draw:stroke', stroke);
     });
 
+    socket.on('draw:stroke-delete', ({ strokeId }) => {
+      const user = userSockets.get(socket.id);
+      if (!user) return;
+
+      const roomState = rooms.get(user.roomId);
+      if (!roomState) return;
+
+      roomState.strokes = roomState.strokes.filter((stroke) => stroke.id !== strokeId);
+      roomState.strokeIds.delete(strokeId);
+      roomState.lastActivity = Date.now();
+
+      saveRoomToStorage(user.roomId, roomState);
+
+      socket.to(user.roomId).emit('draw:stroke-delete', strokeId);
+    });
+
     socket.on('draw:clear', () => {
       const user = userSockets.get(socket.id);
       if (!user) return;
@@ -223,6 +239,24 @@ export function setupSocketHandlers(io: TypedServer): void {
       saveRoomToStorage(user.roomId, roomState);
 
       socket.to(user.roomId).emit('element:delete', elementId);
+    });
+
+    socket.on('board:replace', ({ strokes, elements }) => {
+      const user = userSockets.get(socket.id);
+      if (!user) return;
+
+      const roomState = rooms.get(user.roomId);
+      if (!roomState) return;
+
+      roomState.strokes = strokes;
+      roomState.elements = elements;
+      roomState.strokeIds = new Set(strokes.map((stroke) => stroke.id));
+      roomState.elementIds = new Set(elements.map((element) => element.id));
+      roomState.lastActivity = Date.now();
+
+      saveRoomToStorage(user.roomId, roomState);
+
+      socket.to(user.roomId).emit('board:replace', { strokes, elements });
     });
 
     socket.on('cursor:move', ({ x, y, status }) => {

@@ -24,7 +24,8 @@ const COLORS = [
   "#EC4899",
 ];
 
-const SIZES = [2, 4, 8, 12, 20];
+const MIN_SIZE = 1;
+const MAX_SIZE = 70;
 
 export function Toolbar({
   drawingState,
@@ -41,6 +42,7 @@ export function Toolbar({
   const isShapeTool = ["rectangle", "circle", "line", "arrow"].includes(
     drawingState.tool,
   );
+  const isEraserTool = drawingState.tool === "eraser";
 
   return (
     <div className="bg-white rounded-xl shadow-lg p-3 flex items-center gap-3 flex-wrap max-w-full">
@@ -332,48 +334,71 @@ export function Toolbar({
       <div className="w-px h-8 bg-gray-200" />
 
       {/* Colors */}
-      <div className="flex items-center gap-1.5">
-        {COLORS.map((color) => (
-          <button
-            key={color}
-            onClick={() => onColorChange(color)}
-            className={`w-6 h-6 rounded-full transition-all ${
-              drawingState.color === color
-                ? "ring-2 ring-offset-2 ring-primary-500 scale-110"
-                : "hover:scale-105"
-            }`}
-            style={{ backgroundColor: color }}
-            title={color}
+      {isEraserTool ? (
+        <div className="flex items-center gap-2 px-2 py-1 rounded-lg bg-gray-50 border border-gray-200">
+          <span
+            className="w-6 h-6 rounded-full border-2 border-gray-300 shadow-sm"
+            style={{
+              background: "linear-gradient(135deg, #ffffff 0%, #f3f4f6 100%)",
+            }}
+            title="Eraser"
           />
-        ))}
-      </div>
+          <span className="text-xs font-medium text-gray-500">Eraser</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5">
+          {COLORS.map((color) => (
+            <button
+              key={color}
+              onClick={() => onColorChange(color)}
+              className={`w-6 h-6 rounded-full transition-all ${
+                drawingState.color === color
+                  ? "ring-2 ring-offset-2 ring-primary-500 scale-110"
+                  : "hover:scale-105"
+              }`}
+              style={{ backgroundColor: color }}
+              title={color}
+            />
+          ))}
+        </div>
+      )}
 
       <div className="w-px h-8 bg-gray-200" />
 
       {/* Sizes - only show for drawing/shape tools */}
       {(isDrawingTool || isShapeTool) && (
         <>
-          <div className="flex items-center gap-1">
-            {SIZES.map((size) => (
-              <button
-                key={size}
-                onClick={() => onSizeChange(size)}
-                className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${
-                  drawingState.size === size
-                    ? "bg-primary-100 ring-2 ring-primary-500"
-                    : "hover:bg-gray-100"
-                }`}
-                title={`Size ${size}`}
-              >
-                <span
-                  className="rounded-full bg-gray-800"
-                  style={{
-                    width: Math.min(size + 2, 16),
-                    height: Math.min(size + 2, 16),
-                  }}
-                />
-              </button>
-            ))}
+          <div className="flex items-center gap-3 px-1">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-gray-500">Size</span>
+              <input
+                type="range"
+                min={MIN_SIZE}
+                max={MAX_SIZE}
+                value={drawingState.size}
+                onChange={(e) => onSizeChange(Number(e.target.value))}
+                className="w-28 accent-primary-600 cursor-pointer"
+                title={`Size ${drawingState.size}`}
+              />
+            </div>
+            <div className="relative w-16">
+              <input
+                type="number"
+                min={MIN_SIZE}
+                max={MAX_SIZE}
+                value={drawingState.size}
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  if (Number.isNaN(value)) return;
+                  onSizeChange(Math.max(MIN_SIZE, Math.min(MAX_SIZE, value)));
+                }}
+                className="w-full pl-2 pr-6 py-1.5 text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                aria-label="Brush size"
+              />
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">
+                px
+              </span>
+            </div>
           </div>
           <div className="w-px h-8 bg-gray-200" />
         </>

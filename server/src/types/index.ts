@@ -55,7 +55,7 @@ export interface ShapeElement {
   userId: string;
 }
 
-export type WhiteboardElement = DrawStroke | TextElement | StickyElement | ShapeElement;
+export type WhiteboardElement = TextElement | StickyElement | ShapeElement;
 
 export type PresenceStatus = 'online' | 'drawing' | 'idle';
 
@@ -88,6 +88,10 @@ export interface DrawPayload {
   stroke: DrawStroke;
 }
 
+export interface StrokeDeletePayload {
+  strokeId: string;
+}
+
 export interface ElementPayload {
   element: WhiteboardElement;
 }
@@ -107,15 +111,22 @@ export interface CursorPayload {
   status?: PresenceStatus;
 }
 
+export interface BoardStatePayload {
+  strokes: DrawStroke[];
+  elements: WhiteboardElement[];
+}
+
 export interface ServerToClientEvents {
   'room:joined': (data: { user: User; roomState: RoomState }) => void;
   'room:user-joined': (user: User) => void;
   'room:user-left': (userId: string) => void;
   'draw:stroke': (stroke: DrawStroke) => void;
+  'draw:stroke-delete': (strokeId: string) => void;
   'draw:clear': () => void;
   'element:add': (element: WhiteboardElement) => void;
   'element:update': (data: { elementId: string; updates: Partial<WhiteboardElement> }) => void;
   'element:delete': (elementId: string) => void;
+  'board:replace': (payload: BoardStatePayload) => void;
   'cursor:update': (cursor: CursorPosition) => void;
   'cursor:remove': (userId: string) => void;
   'error': (message: string) => void;
@@ -125,9 +136,11 @@ export interface ClientToServerEvents {
   'room:join': (payload: JoinRoomPayload) => void;
   'room:leave': () => void;
   'draw:stroke': (payload: DrawPayload) => void;
+  'draw:stroke-delete': (payload: StrokeDeletePayload) => void;
   'draw:clear': () => void;
   'element:add': (payload: ElementPayload) => void;
   'element:update': (payload: ElementUpdatePayload) => void;
   'element:delete': (payload: ElementDeletePayload) => void;
+  'board:replace': (payload: BoardStatePayload) => void;
   'cursor:move': (payload: CursorPayload) => void;
 }

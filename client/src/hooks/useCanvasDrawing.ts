@@ -50,8 +50,8 @@ export function useCanvasDrawing({
       ctx.lineWidth = stroke.size;
 
       if (stroke.tool === 'eraser') {
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.strokeStyle = 'rgba(0,0,0,1)';
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = '#ffffff';
       } else {
         ctx.globalCompositeOperation = 'source-over';
         ctx.strokeStyle = stroke.color;
@@ -103,7 +103,6 @@ export function useCanvasDrawing({
     (e: MouseEvent<HTMLCanvasElement>) => {
       if (e.button !== 0) return;
 
-      console.log('Hook mouseDown:', { tool: drawingState.tool, isDrawingRef: isDrawingRef.current });
       isDrawingRef.current = true;
       const point = getCanvasPoint(e);
       currentPointsRef.current = [point];
@@ -114,12 +113,7 @@ export function useCanvasDrawing({
 
   const handleMouseMove = useCallback(
     (e: MouseEvent<HTMLCanvasElement>) => {
-      if (!isDrawingRef.current) {
-        console.log('Mouse move but not drawing');
-        return;
-      }
-
-      console.log('Hook mouseMove - drawing!');
+      if (!isDrawingRef.current) return;
       const canvas = canvasRef.current;
       if (!canvas) return;
 
