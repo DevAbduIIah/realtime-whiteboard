@@ -31,6 +31,7 @@ import type {
   ShapeElement,
   StickyElement,
   TextElement,
+  ViewState,
   WhiteboardElement,
 } from "../types";
 
@@ -77,6 +78,13 @@ interface MarqueeSelection {
   end: Point;
 }
 
+interface Bounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 type SelectionInteraction =
   | {
       type: "dragging";
@@ -105,6 +113,127 @@ const LIVE_UPDATE_DELAY = 40;
 const PASTE_OFFSET = 24;
 const ERASABLE_SHAPE_TYPES = new Set(["rectangle", "circle", "line", "arrow"]);
 const SHAPE_SAMPLE_STEP = 8;
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 3;
+const ZOOM_STEP = 1.15;
+const VIEWPORT_PADDING = 48;
+
+function clampZoom(zoom: number): number {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+}
+
+function clamp(
+  value: number,
+  min: number,
+  max: number,
+): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getStrokeBounds(stroke: DrawStroke): Bounds | null {
+  if (stroke.points.length === 0) {
+    return null;
+  }
+
+  const coordinates = stroke.points.reduce(
+    (accumulator, point) => ({
+      left: Math.min(accumulator.left, point.x),
+      top: Math.min(accumulator.top, point.y),
+      right: Math.max(accumulator.right, point.x),
+      bottom: Math.max(accumulator.bottom, point.y),
+    }),
+    {
+      left: stroke.points[0].x,
+      top: stroke.points[0].y,
+      right: stroke.points[0].x,
+      bottom: stroke.points[0].y,
+    },
+  );
+
+  const padding = Math.max(stroke.size, 8);
+
+  return {
+    left: coordinates.left - padding,
+    top: coordinates.top - padding,
+    right: coordinates.right + padding,
+    bottom: coordinates.bottom + padding,
+  };
+}
+
+function mergeBounds(bounds: Bounds[]): Bounds | null {
+  if (bounds.length === 0) {
+    return null;
+  }
+
+  return bounds.reduce(
+    (accumulator, bound) => ({
+      left: Math.min(accumulator.left, bound.left),
+      top: Math.min(accumulator.top, bound.top),
+      right: Math.max(accumulator.right, bound.right),
+      bottom: Math.max(accumulator.bottom, bound.bottom),
+    }),
+    bounds[0],
+  );
+}
+
+function getBoardContentBounds(
+  strokes: DrawStroke[],
+  elements: WhiteboardElement[],
+): Bounds {
+  const strokeBounds = strokes
+    .map(getStrokeBounds)
+    .filter((bound): bound is Bounds => Boolean(bound));
+  const elementBounds = elements.map((element) => getElementBounds(element));
+  const contentBounds = mergeBounds([...strokeBounds, ...elementBounds]);
+
+  return (
+    contentBounds ?? {
+      left: 0,
+      top: 0,
+      right: CANVAS_WIDTH,
+      bottom: CANVAS_HEIGHT,
+    }
+  );
+}
+
+function getCenteredView(
+  containerWidth: number,
+  containerHeight: number,
+  zoom: number,
+): ViewState {
+  return {
+    zoom,
+    panX: (containerWidth - CANVAS_WIDTH * zoom) / 2,
+    panY: (containerHeight - CANVAS_HEIGHT * zoom) / 2,
+  };
+}
+
+function getFitView(
+  containerWidth: number,
+  containerHeight: number,
+  contentBounds: Bounds,
+): ViewState {
+  const contentWidth = Math.max(1, contentBounds.right - contentBounds.left);
+  const contentHeight = Math.max(1, contentBounds.bottom - contentBounds.top);
+  const availableWidth = Math.max(1, containerWidth - VIEWPORT_PADDING * 2);
+  const availableHeight = Math.max(1, containerHeight - VIEWPORT_PADDING * 2);
+  const zoom = clampZoom(
+    Math.min(availableWidth / contentWidth, availableHeight / contentHeight, 1),
+  );
+
+  return {
+    zoom,
+    panX: containerWidth / 2 - (contentBounds.left + contentWidth / 2) * zoom,
+    panY: containerHeight / 2 - (contentBounds.top + contentHeight / 2) * zoom,
+  };
+}
+
+function worldToScreen(point: Point, viewState: ViewState): Point {
+  return {
+    x: point.x * viewState.zoom + viewState.panX,
+    y: point.y * viewState.zoom + viewState.panY,
+  };
+}
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -423,7 +552,22 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const hasViewportInteractionRef = useRef(false);
+  const hasInitializedViewportRef = useRef(false);
+  const panSessionRef = useRef<{
+    startClientX: number;
+    startClientY: number;
+    startPanX: number;
+    startPanY: number;
+  } | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [viewState, setViewState] = useState<ViewState>({
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+  });
+  const [isViewportPanning, setIsViewportPanning] = useState(false);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [shapeStart, setShapeStart] = useState<Point | null>(null);
   const [previewShape, setPreviewShape] = useState<ShapeElement | null>(null);
   const [textInput, setTextInput] = useState<{
@@ -537,6 +681,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     () => getSelectionBounds(selectedElements),
     [selectedElements],
   );
+  const contentBounds = useMemo(
+    () => getBoardContentBounds(strokes, elements),
+    [elements, strokes],
+  );
 
   const getCanvasPoint = useCallback(
     (e: React.MouseEvent): Point => {
@@ -554,6 +702,76 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     },
     [canvasRef],
   );
+
+  const fitToScreen = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    hasViewportInteractionRef.current = false;
+    hasInitializedViewportRef.current = true;
+    setViewState(
+      getFitView(
+        container.clientWidth,
+        container.clientHeight,
+        contentBounds,
+      ),
+    );
+  }, [contentBounds]);
+
+  const resetZoom = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    hasViewportInteractionRef.current = true;
+    hasInitializedViewportRef.current = true;
+    setViewState(getCenteredView(container.clientWidth, container.clientHeight, 1));
+  }, []);
+
+  const zoomAtPoint = useCallback((nextZoom: number, anchorX: number, anchorY: number) => {
+    setViewState((previousState) => {
+      const clampedZoom = clampZoom(nextZoom);
+      const worldX = (anchorX - previousState.panX) / previousState.zoom;
+      const worldY = (anchorY - previousState.panY) / previousState.zoom;
+
+      return {
+        zoom: clampedZoom,
+        panX: anchorX - worldX * clampedZoom,
+        panY: anchorY - worldY * clampedZoom,
+      };
+    });
+  }, []);
+
+  const zoomIn = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    hasViewportInteractionRef.current = true;
+    zoomAtPoint(
+      viewState.zoom * ZOOM_STEP,
+      container.clientWidth / 2,
+      container.clientHeight / 2,
+    );
+  }, [viewState.zoom, zoomAtPoint]);
+
+  const zoomOut = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    hasViewportInteractionRef.current = true;
+    zoomAtPoint(
+      viewState.zoom / ZOOM_STEP,
+      container.clientWidth / 2,
+      container.clientHeight / 2,
+    );
+  }, [viewState.zoom, zoomAtPoint]);
 
   const clearPendingSync = useCallback(() => {
     if (syncTimeoutRef.current) {
@@ -690,6 +908,121 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       clearPendingSync();
     };
   }, [clearPendingSync]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const updateViewport = () => {
+      if (!hasInitializedViewportRef.current) {
+        hasInitializedViewportRef.current = true;
+        setViewState(
+          getFitView(
+            container.clientWidth,
+            container.clientHeight,
+            contentBounds,
+          ),
+        );
+        return;
+      }
+
+      if (hasViewportInteractionRef.current) {
+        setViewState((previousState) => ({
+          ...previousState,
+          panX: clamp(previousState.panX, -CANVAS_WIDTH * previousState.zoom, container.clientWidth),
+          panY: clamp(previousState.panY, -CANVAS_HEIGHT * previousState.zoom, container.clientHeight),
+        }));
+        return;
+      }
+
+      setViewState((previousState) => ({
+        ...previousState,
+        panX: clamp(previousState.panX, -CANVAS_WIDTH * previousState.zoom, container.clientWidth),
+        panY: clamp(previousState.panY, -CANVAS_HEIGHT * previousState.zoom, container.clientHeight),
+      }));
+    };
+
+    updateViewport();
+
+    const observer = new ResizeObserver(() => {
+      updateViewport();
+    });
+
+    observer.observe(container);
+
+    return () => observer.disconnect();
+  }, [contentBounds]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space") {
+        return;
+      }
+
+      if (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      setIsSpacePressed(true);
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space") {
+        return;
+      }
+
+      setIsSpacePressed(false);
+      setIsViewportPanning(false);
+      panSessionRef.current = null;
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isViewportPanning) {
+      return;
+    }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const session = panSessionRef.current;
+      if (!session) {
+        return;
+      }
+
+      hasViewportInteractionRef.current = true;
+      setViewState((previousState) => ({
+        ...previousState,
+        panX: session.startPanX + (event.clientX - session.startClientX),
+        panY: session.startPanY + (event.clientY - session.startClientY),
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setIsViewportPanning(false);
+      panSessionRef.current = null;
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isViewportPanning]);
 
   useEffect(() => {
     setSelectedElementIds((previousIds) => {
@@ -1036,8 +1369,63 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     [resolvedElementMap, resolvedElements, selectedElementIds, selectedElements],
   );
 
+  const startViewportPan = useCallback(
+    (clientX: number, clientY: number) => {
+      panSessionRef.current = {
+        startClientX: clientX,
+        startClientY: clientY,
+        startPanX: viewState.panX,
+        startPanY: viewState.panY,
+      };
+      setIsViewportPanning(true);
+    },
+    [viewState.panX, viewState.panY],
+  );
+
+  const handleContainerMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!(isSpacePressed || event.button === 1)) {
+        return;
+      }
+
+      event.preventDefault();
+      hasViewportInteractionRef.current = true;
+      startViewportPan(event.clientX, event.clientY);
+    },
+    [isSpacePressed, startViewportPan],
+  );
+
+  const handleContainerWheel = useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      if (!(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+
+      event.preventDefault();
+      hasViewportInteractionRef.current = true;
+
+      const containerRect = containerRef.current?.getBoundingClientRect();
+      if (!containerRect) {
+        return;
+      }
+
+      const zoomDirection = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      zoomAtPoint(
+        viewState.zoom * zoomDirection,
+        event.clientX - containerRect.left,
+        event.clientY - containerRect.top,
+      );
+    },
+    [viewState.zoom, zoomAtPoint],
+  );
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) {
+      return;
+    }
+
+    if (isSpacePressed || isViewportPanning) {
+      e.preventDefault();
       return;
     }
 
@@ -1302,6 +1690,14 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   };
 
   const getCursor = () => {
+    if (isViewportPanning) {
+      return "grabbing";
+    }
+
+    if (isSpacePressed) {
+      return "grab";
+    }
+
     if (selectionMode === "dragging") {
       return "grabbing";
     }
@@ -1332,29 +1728,42 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           "radial-gradient(circle, #e5e7eb 1px, transparent 1px)",
         backgroundSize: "20px 20px",
       }}
+      onMouseDown={handleContainerMouseDown}
+      onWheel={handleContainerWheel}
     >
-      <canvas
-        ref={canvasRef}
-        width={CANVAS_WIDTH}
-        height={CANVAS_HEIGHT}
-        className="absolute inset-0 w-full h-full rounded-xl"
-        style={{ cursor: getCursor(), background: "transparent" }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleCanvasMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseLeave}
-      />
+      <div
+        className="absolute left-0 top-0"
+        style={{
+          width: `${CANVAS_WIDTH}px`,
+          height: `${CANVAS_HEIGHT}px`,
+          transform: `translate(${viewState.panX}px, ${viewState.panY}px) scale(${viewState.zoom})`,
+          transformOrigin: "top left",
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          width={CANVAS_WIDTH}
+          height={CANVAS_HEIGHT}
+          className="absolute inset-0 rounded-xl"
+          style={{
+            width: `${CANVAS_WIDTH}px`,
+            height: `${CANVAS_HEIGHT}px`,
+            cursor: getCursor(),
+            background: "transparent",
+          }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleCanvasMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
+        />
+      </div>
 
       {textInput.visible && containerRef.current && (
         <div
           className="absolute"
           style={{
-            left:
-              (textInput.x / CANVAS_WIDTH) *
-              containerRef.current.getBoundingClientRect().width,
-            top:
-              (textInput.y / CANVAS_HEIGHT) *
-              containerRef.current.getBoundingClientRect().height,
+            left: worldToScreen({ x: textInput.x, y: textInput.y }, viewState).x,
+            top: worldToScreen({ x: textInput.x, y: textInput.y }, viewState).y,
           }}
         >
           <textarea
@@ -1383,23 +1792,20 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       {Array.from(cursors.entries()).map(([cursorUserId, cursor]) => {
         if (cursorUserId === userId) return null;
 
-        const container = containerRef.current;
-        if (!container) return null;
-
-        const rect = container.getBoundingClientRect();
-        const scaleX = rect.width / CANVAS_WIDTH;
-        const scaleY = rect.height / CANVAS_HEIGHT;
-
         const userColor = getUserColor(cursorUserId);
         const isUserDrawing = cursor.status === "drawing";
+        const screenPoint = worldToScreen(
+          { x: cursor.x, y: cursor.y },
+          viewState,
+        );
 
         return (
           <div
             key={cursorUserId}
             className="absolute pointer-events-none transition-all duration-75 ease-out"
             style={{
-              left: cursor.x * scaleX,
-              top: cursor.y * scaleY,
+              left: screenPoint.x,
+              top: screenPoint.y,
               transform: "translate(-2px, -2px)",
             }}
           >
@@ -1430,6 +1836,41 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           </div>
         );
       })}
+
+      <div className="absolute bottom-4 right-4 flex items-center gap-2 rounded-xl bg-white/95 px-3 py-2 shadow-lg border border-gray-200 backdrop-blur-sm">
+        <button
+          onClick={zoomOut}
+          className="w-8 h-8 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors"
+          title="Zoom out"
+        >
+          -
+        </button>
+        <button
+          onClick={resetZoom}
+          className="min-w-[72px] px-2 py-1.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 transition-colors"
+          title="Reset zoom"
+        >
+          {Math.round(viewState.zoom * 100)}%
+        </button>
+        <button
+          onClick={zoomIn}
+          className="w-8 h-8 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors"
+          title="Zoom in"
+        >
+          +
+        </button>
+        <div className="w-px h-6 bg-gray-200" />
+        <button
+          onClick={fitToScreen}
+          className="px-2.5 py-1.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 transition-colors"
+          title="Fit board to screen"
+        >
+          Fit
+        </button>
+        <span className="hidden sm:inline text-xs text-gray-400">
+          Hold Space to pan
+        </span>
+      </div>
     </div>
   );
 });
