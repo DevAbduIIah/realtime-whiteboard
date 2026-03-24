@@ -58,19 +58,24 @@ export interface ShapeElement {
 export type WhiteboardElement = TextElement | StickyElement | ShapeElement;
 
 export type PresenceStatus = 'online' | 'drawing' | 'idle';
+export type ReactionKind = 'ping' | 'thumbs' | 'celebrate' | 'question';
 
 export interface CursorPosition {
   x: number;
   y: number;
   userId: string;
+  clientId: string;
   userName: string;
   status?: PresenceStatus;
 }
 
 export interface User {
   id: string;
+  clientId: string;
   name: string;
   roomId: string;
+  status: PresenceStatus;
+  lastActiveAt: number;
 }
 
 export interface RoomState {
@@ -82,6 +87,7 @@ export interface RoomState {
 export interface JoinRoomPayload {
   roomId: string;
   userName: string;
+  clientId: string;
 }
 
 export interface DrawPayload {
@@ -111,6 +117,21 @@ export interface CursorPayload {
   status?: PresenceStatus;
 }
 
+export interface BoardReaction {
+  id: string;
+  x: number;
+  y: number;
+  kind: ReactionKind;
+  userId: string;
+  clientId: string;
+  userName: string;
+  createdAt: number;
+}
+
+export interface ReactionPayload {
+  reaction: BoardReaction;
+}
+
 export interface BoardStatePayload {
   strokes: DrawStroke[];
   elements: WhiteboardElement[];
@@ -119,6 +140,7 @@ export interface BoardStatePayload {
 export interface ServerToClientEvents {
   'room:joined': (data: { user: User; roomState: RoomState }) => void;
   'room:user-joined': (user: User) => void;
+  'room:user-updated': (user: User) => void;
   'room:user-left': (userId: string) => void;
   'draw:stroke': (stroke: DrawStroke) => void;
   'draw:stroke-delete': (strokeId: string) => void;
@@ -129,6 +151,7 @@ export interface ServerToClientEvents {
   'board:replace': (payload: BoardStatePayload) => void;
   'cursor:update': (cursor: CursorPosition) => void;
   'cursor:remove': (userId: string) => void;
+  'reaction:add': (reaction: BoardReaction) => void;
   'error': (message: string) => void;
 }
 
@@ -143,4 +166,5 @@ export interface ClientToServerEvents {
   'element:delete': (payload: ElementDeletePayload) => void;
   'board:replace': (payload: BoardStatePayload) => void;
   'cursor:move': (payload: CursorPayload) => void;
+  'reaction:add': (payload: ReactionPayload) => void;
 }

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSocket } from "../contexts/SocketContext";
 import { Canvas, type CanvasHandle } from "./Canvas";
 import { Toolbar } from "./Toolbar";
@@ -12,12 +12,133 @@ import {
   parseImportData,
 } from "../utils/export";
 import type {
+  BoardReaction,
+  CursorPosition,
   DrawStroke,
   DrawingState,
-  Tool,
   PresenceStatus,
+  ReactionKind,
+  Tool,
+  User,
   WhiteboardElement,
 } from "../types";
+
+const IDLE_TIMEOUT_MS = 5000;
+
+const REACTION_OPTIONS: Array<{
+  kind: ReactionKind;
+  badge: string;
+  label: string;
+  description: string;
+}> = [
+  {
+    kind: "ping",
+    badge: "!",
+    label: "Ping",
+    description: "Click the board to draw attention to a spot.",
+  },
+  {
+    kind: "thumbs",
+    badge: "+1",
+    label: "Appreciate",
+    description: "Drop a quick acknowledgment on the board.",
+  },
+  {
+    kind: "celebrate",
+    badge: "*",
+    label: "Celebrate",
+    description: "Mark a moment with a lightweight cheer.",
+  },
+  {
+    kind: "question",
+    badge: "?",
+    label: "Question",
+    description: "Flag an area that needs attention.",
+  },
+];
+
+function getPresenceMeta(status: PresenceStatus): {
+  label: string;
+  tone: string;
+  detail: string;
+} {
+  switch (status) {
+    case "drawing":
+      return {
+        label: "Drawing",
+        tone: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+        detail: "Actively sketching right now",
+      };
+    case "idle":
+      return {
+        label: "Idle",
+        tone: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
+        detail: "Connected, but currently inactive",
+      };
+    case "online":
+    default:
+      return {
+        label: "Online",
+        tone: "bg-sky-50 text-sky-700 ring-1 ring-sky-200",
+        detail: "Live in the room and ready",
+      };
+  }
+}
+
+function sortParticipants(currentUserId: string, participants: User[]): User[] {
+  const presenceOrder: Record<PresenceStatus, number> = {
+    drawing: 0,
+    online: 1,
+    idle: 2,
+  };
+
+  return [...participants].sort((left, right) => {
+    if (left.id === currentUserId) return -1;
+    if (right.id === currentUserId) return 1;
+
+    const presenceDelta =
+      presenceOrder[left.status] - presenceOrder[right.status];
+    if (presenceDelta !== 0) {
+      return presenceDelta;
+    }
+
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function getConnectionCopy(
+  connectionStatus: "connected" | "disconnected" | "reconnecting",
+  reconnectAttempt: number,
+): {
+  label: string;
+  detail: string;
+  dot: string;
+} {
+  switch (connectionStatus) {
+    case "reconnecting":
+      return {
+        label: "Reconnecting",
+        detail:
+          reconnectAttempt > 0
+            ? `Attempt ${reconnectAttempt} to restore live sync`
+            : "Restoring live sync with the room",
+        dot: "bg-amber-500 animate-pulse",
+      };
+    case "disconnected":
+      return {
+        label: "Disconnected",
+        detail: "Live updates are paused until the socket reconnects",
+        dot: "bg-rose-500",
+      };
+    case "connected":
+    default:
+      return {
+        label: "Healthy",
+        detail: "Live sync is stable",
+        dot: "bg-emerald-500 animate-pulse",
+      };
+  }
+}
 
 export function Whiteboard() {
   const {
@@ -27,11 +148,15 @@ export function Whiteboard() {
     sendStroke,
     sendClear,
     sendCursorMove,
+    sendReaction,
     sendElement,
     updateElement,
     deleteElement,
     cursors,
+    reactions,
     connectionStatus,
+    reconnectAttempt,
+    lastRejoinedAt,
     canUndo,
     canRedo,
     captureHistorySnapshot,
@@ -49,16 +174,49 @@ export function Whiteboard() {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [activeReactionKind, setActiveReactionKind] =
+    useState<ReactionKind | null>(null);
+  const [followedUserId, setFollowedUserId] = useState<string | null>(null);
 
   const lastActivityRef = useRef<number>(Date.now());
   const presenceStatusRef = useRef<PresenceStatus>("online");
+  const lastCursorPointRef = useRef<{ x: number; y: number } | null>(null);
+  const lastRejoinedHandledRef = useRef<number | null>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const canvasRef = useRef<CanvasHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Keyboard shortcuts
+  const showToastMessage = useCallback((message: string) => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+
+    setShowToast(message);
+    toastTimeoutRef.current = setTimeout(() => {
+      setShowToast(null);
+      toastTimeoutRef.current = null;
+    }, 2200);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!lastRejoinedAt || lastRejoinedHandledRef.current === lastRejoinedAt) {
+      return;
+    }
+
+    lastRejoinedHandledRef.current = lastRejoinedAt;
+    showToastMessage("Rejoined the room and resumed live sync.");
+  }, [lastRejoinedAt, showToastMessage]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger shortcuts if user is typing in an input
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement
@@ -66,14 +224,12 @@ export function Whiteboard() {
         return;
       }
 
-      // Undo: Ctrl+Z
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
         e.preventDefault();
         undo();
         return;
       }
 
-      // Redo: Ctrl+Shift+Z or Ctrl+Y
       if (
         (e.ctrlKey || e.metaKey) &&
         (e.key === "y" || (e.key === "z" && e.shiftKey))
@@ -83,7 +239,6 @@ export function Whiteboard() {
         return;
       }
 
-      // Tool shortcuts (single letter without modifiers)
       if (e.key === "Delete" || e.key === "Backspace") {
         if (canvasRef.current?.deleteSelection()) {
           e.preventDefault();
@@ -113,6 +268,12 @@ export function Whiteboard() {
       }
 
       if (e.key === "Escape") {
+        if (activeReactionKind) {
+          setActiveReactionKind(null);
+          e.preventDefault();
+          return;
+        }
+
         if (canvasRef.current?.hasSelection()) {
           canvasRef.current.clearSelection();
           e.preventDefault();
@@ -155,25 +316,79 @@ export function Whiteboard() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [undo, redo]);
+  }, [activeReactionKind, redo, undo]);
 
-  // Track idle state
   useEffect(() => {
-    const checkIdle = () => {
-      const now = Date.now();
+    const interval = setInterval(() => {
+      const lastCursorPoint = lastCursorPointRef.current;
       if (
-        now - lastActivityRef.current > 5000 &&
-        presenceStatusRef.current !== "idle"
+        !lastCursorPoint ||
+        Date.now() - lastActivityRef.current <= IDLE_TIMEOUT_MS ||
+        presenceStatusRef.current === "idle"
       ) {
-        presenceStatusRef.current = "idle";
+        return;
       }
-    };
 
-    const interval = setInterval(checkIdle, 1000);
+      presenceStatusRef.current = "idle";
+      sendCursorMove(lastCursorPoint.x, lastCursorPoint.y, "idle");
+    }, 1000);
+
     return () => clearInterval(interval);
-  }, []);
+  }, [sendCursorMove]);
+
+  useEffect(() => {
+    if (!roomState || !followedUserId) {
+      return;
+    }
+
+    if (!roomState.users.some((user) => user.id === followedUserId)) {
+      setFollowedUserId(null);
+      showToastMessage("Stopped following because that collaborator left.");
+    }
+  }, [followedUserId, roomState, showToastMessage]);
+
+  const participants = useMemo(() => {
+    if (!currentUser || !roomState) {
+      return [];
+    }
+
+    return sortParticipants(currentUser.id, roomState.users);
+  }, [currentUser, roomState]);
+
+  const participantStats = useMemo(() => {
+    return participants.reduce(
+      (stats, participant) => {
+        stats[participant.status] += 1;
+        return stats;
+      },
+      {
+        drawing: 0,
+        online: 0,
+        idle: 0,
+      } satisfies Record<PresenceStatus, number>,
+    );
+  }, [participants]);
+
+  const followedUser = useMemo(
+    () => participants.find((participant) => participant.id === followedUserId) ?? null,
+    [followedUserId, participants],
+  );
+
+  const followedCursor = useMemo<CursorPosition | null>(() => {
+    if (!followedUserId) {
+      return null;
+    }
+
+    return cursors.get(followedUserId) ?? null;
+  }, [cursors, followedUserId]);
+
+  const connectionCopy = useMemo(
+    () => getConnectionCopy(connectionStatus, reconnectAttempt),
+    [connectionStatus, reconnectAttempt],
+  );
 
   const handleToolChange = useCallback((tool: Tool) => {
+    setActiveReactionKind(null);
     setDrawingState((prev) => ({ ...prev, tool }));
   }, []);
 
@@ -205,11 +420,6 @@ export function Whiteboard() {
     lastActivityRef.current = Date.now();
   }, []);
 
-  const showToastMessage = useCallback((message: string) => {
-    setShowToast(message);
-    setTimeout(() => setShowToast(null), 2000);
-  }, []);
-
   const handleClear = useCallback(() => {
     setShowClearConfirm(true);
   }, []);
@@ -217,19 +427,21 @@ export function Whiteboard() {
   const confirmClear = useCallback(() => {
     sendClear();
     setShowClearConfirm(false);
-    showToastMessage("Canvas cleared");
+    showToastMessage("Canvas cleared.");
   }, [sendClear, showToastMessage]);
 
   const handleShare = useCallback(() => {
     if (!currentUser) return;
+
     const link = getShareableLink(currentUser.roomId);
     copyToClipboard(link).then(() => {
-      showToastMessage("Link copied to clipboard!");
+      showToastMessage("Link copied to clipboard.");
     });
   }, [currentUser, showToastMessage]);
 
   const handleExportJSON = useCallback(() => {
     if (!roomState || !currentUser) return;
+
     try {
       downloadJSON(
         roomState.strokes,
@@ -237,25 +449,26 @@ export function Whiteboard() {
         `whiteboard-${currentUser.roomId}`,
       );
       setShowExportMenu(false);
-      showToastMessage("Exported as JSON");
+      showToastMessage("Exported board as JSON.");
     } catch (error) {
-      showToastMessage("Export failed");
+      showToastMessage("Export failed.");
       console.error("Export error:", error);
     }
-  }, [roomState, currentUser, showToastMessage]);
+  }, [currentUser, roomState, showToastMessage]);
 
   const handleExportPNG = useCallback(async () => {
     const canvasElement =
       canvasRef.current?.getExportCanvas() ??
       canvasRef.current?.getCanvasElement();
     if (!canvasElement || !currentUser) return;
+
     setIsExporting(true);
     try {
       await exportToPNG(canvasElement, `whiteboard-${currentUser.roomId}`);
       setShowExportMenu(false);
-      showToastMessage("Exported as PNG");
+      showToastMessage("Exported board as PNG.");
     } catch (error) {
-      showToastMessage("Export failed");
+      showToastMessage("Export failed.");
       console.error("Export error:", error);
     } finally {
       setIsExporting(false);
@@ -277,34 +490,84 @@ export function Whiteboard() {
         const content = event.target?.result as string;
         const data = parseImportData(content);
         if (data) {
-          // Import strokes and elements
           data.strokes.forEach((stroke) => sendStroke(stroke));
           data.elements.forEach((element) => sendElement(element));
           showToastMessage(
-            `Imported ${data.strokes.length} strokes and ${data.elements.length} elements`,
+            `Imported ${data.strokes.length} strokes and ${data.elements.length} elements.`,
           );
         } else {
-          showToastMessage("Invalid file format");
+          showToastMessage("Invalid file format.");
         }
       };
       reader.readAsText(file);
-      // Reset input so same file can be imported again
       e.target.value = "";
     },
-    [sendStroke, sendElement, showToastMessage],
+    [sendElement, sendStroke, showToastMessage],
   );
 
   const handleMouseMove = useMemo(
     () =>
       throttle((x: number, y: number, drawing: boolean) => {
         lastActivityRef.current = Date.now();
+        lastCursorPointRef.current = { x, y };
+
         const status: PresenceStatus = drawing
           ? "drawing"
-          : presenceStatusRef.current;
+          : presenceStatusRef.current === "idle"
+            ? "online"
+            : presenceStatusRef.current;
+
         presenceStatusRef.current = status;
         sendCursorMove(x, y, status);
       }, 50),
     [sendCursorMove],
+  );
+
+  const handleReactionAdd = useCallback(
+    (reaction: BoardReaction) => {
+      sendReaction(reaction);
+      setActiveReactionKind(null);
+      showToastMessage("Reaction sent to the room.");
+    },
+    [sendReaction, showToastMessage],
+  );
+
+  const handleReactionToggle = useCallback((kind: ReactionKind) => {
+    setActiveReactionKind((prev) => (prev === kind ? null : kind));
+  }, []);
+
+  const handleJumpToUser = useCallback(
+    (user: User) => {
+      const cursor = cursors.get(user.id);
+      if (!cursor) {
+        showToastMessage(`${user.name} has not shared a live cursor yet.`);
+        return;
+      }
+
+      canvasRef.current?.jumpToPoint({ x: cursor.x, y: cursor.y });
+      setFollowedUserId(null);
+      showToastMessage(`Jumped to ${user.name}.`);
+    },
+    [cursors, showToastMessage],
+  );
+
+  const handleFollowToggle = useCallback(
+    (user: User) => {
+      if (followedUserId === user.id) {
+        setFollowedUserId(null);
+        showToastMessage(`Stopped following ${user.name}.`);
+        return;
+      }
+
+      if (!cursors.has(user.id)) {
+        showToastMessage(`${user.name} has not shared a live cursor yet.`);
+        return;
+      }
+
+      setFollowedUserId(user.id);
+      showToastMessage(`Following ${user.name}.`);
+    },
+    [cursors, followedUserId, showToastMessage],
   );
 
   if (!currentUser || !roomState) {
@@ -312,12 +575,12 @@ export function Whiteboard() {
   }
 
   return (
-    <div className="h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex flex-col overflow-hidden">
-      <header className="bg-white/80 backdrop-blur-sm border-b border-gray-200 px-3 md:px-4 py-3 flex items-center justify-between flex-shrink-0 gap-2">
-        <div className="flex items-center gap-2 md:gap-4 min-w-0">
-          <div className="w-10 h-10 bg-gradient-to-br from-primary-500 to-primary-600 rounded-xl flex items-center justify-center shadow-sm flex-shrink-0">
+    <div className="flex h-screen flex-col overflow-hidden bg-gradient-to-br from-gray-50 via-white to-slate-100">
+      <header className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white/85 px-3 py-3 backdrop-blur-sm md:px-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 shadow-sm">
             <svg
-              className="w-5 h-5 text-white"
+              className="h-5 w-5 text-white"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -330,70 +593,72 @@ export function Whiteboard() {
               />
             </svg>
           </div>
+
           <div className="min-w-0">
-            <h1 className="font-semibold text-gray-900 hidden sm:block">
+            <h1 className="hidden font-semibold text-gray-900 sm:block">
               Whiteboard
             </h1>
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              <span className="px-2 py-0.5 bg-gray-100 rounded font-mono truncate max-w-[100px] sm:max-w-none">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span className="max-w-[110px] truncate rounded bg-gray-100 px-2 py-0.5 font-mono sm:max-w-none">
                 {currentUser.roomId}
               </span>
               <span className="hidden sm:inline">&bull;</span>
               <span className="hidden sm:inline">
-                {roomState.users.length}{" "}
-                {roomState.users.length === 1 ? "participant" : "participants"}
+                {participants.length}{" "}
+                {participants.length === 1 ? "participant" : "participants"}
+              </span>
+              <span className="hidden md:inline">&bull;</span>
+              <span className="hidden md:inline">
+                {participantStats.drawing} drawing now
               </span>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 md:gap-3 flex-shrink-0">
-          <div className="hidden md:flex items-center -space-x-2">
-            {roomState.users.slice(0, 6).map((user) => {
-              const color = getUserColor(user.id);
-              const isCurrentUser = user.id === currentUser.id;
+        <div className="flex flex-shrink-0 items-center gap-2 md:gap-3">
+          <div className="hidden items-center -space-x-2 lg:flex">
+            {participants.slice(0, 6).map((user) => {
+              const color = getUserColor(user.clientId);
+              const isCurrent = user.id === currentUser.id;
+
               return (
                 <div
                   key={user.id}
-                  className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium text-white border-2 border-white shadow-sm ${color.bg} ${isCurrentUser ? "ring-2 ring-primary-400 ring-offset-1" : ""}`}
-                  title={user.name + (isCurrentUser ? " (you)" : "")}
+                  className={`flex h-8 w-8 items-center justify-center rounded-full border-2 border-white text-xs font-medium text-white shadow-sm ${color.bg} ${isCurrent ? "ring-2 ring-primary-300 ring-offset-1" : ""}`}
+                  title={`${user.name}${isCurrent ? " (you)" : ""}`}
                 >
                   {getUserInitials(user.name)}
                 </div>
               );
             })}
-            {roomState.users.length > 6 && (
-              <div className="w-8 h-8 rounded-full bg-gray-200 text-gray-600 flex items-center justify-center text-xs font-medium border-2 border-white shadow-sm">
-                +{roomState.users.length - 6}
-              </div>
-            )}
           </div>
-          <div className="w-px h-8 bg-gray-200 hidden md:block" />
-          <div className="flex items-center gap-2">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                connectionStatus === "connected"
-                  ? "bg-green-500 animate-pulse"
-                  : connectionStatus === "reconnecting"
-                    ? "bg-yellow-500 animate-pulse"
-                    : "bg-red-500"
-              }`}
-            />
-            <span className="text-sm text-gray-600 font-medium hidden lg:block">
-              {connectionStatus === "reconnecting"
-                ? "Reconnecting..."
-                : currentUser.name}
-            </span>
+
+          <div className="hidden h-8 w-px bg-gray-200 md:block" />
+
+          <div className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1.5 shadow-sm">
+            <span className={`h-2.5 w-2.5 rounded-full ${connectionCopy.dot}`} />
+            <div className="hidden text-left lg:block">
+              <p className="text-xs font-semibold text-gray-700">
+                {connectionCopy.label}
+              </p>
+              <p className="text-[11px] text-gray-500">
+                {connectionStatus === "connected"
+                  ? currentUser.name
+                  : connectionCopy.detail}
+              </p>
+            </div>
           </div>
-          <div className="w-px h-8 bg-gray-200 hidden sm:block" />
+
+          <div className="hidden h-8 w-px bg-gray-200 sm:block" />
+
           <button
             onClick={handleShare}
-            className="flex items-center gap-2 px-2 md:px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-lg transition-colors font-medium"
+            className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 md:px-3"
             title="Copy shareable link"
             aria-label="Share"
           >
             <svg
-              className="w-4 h-4"
+              className="h-4 w-4"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -407,14 +672,15 @@ export function Whiteboard() {
             </svg>
             <span className="hidden md:inline">Share</span>
           </button>
+
           <div className="relative">
             <button
-              onClick={() => setShowExportMenu(!showExportMenu)}
-              className="flex items-center gap-2 px-2 md:px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-lg transition-colors font-medium"
+              onClick={() => setShowExportMenu((prev) => !prev)}
+              className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 md:px-3"
               aria-label="Export menu"
             >
               <svg
-                className="w-4 h-4"
+                className="h-4 w-4"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -428,7 +694,7 @@ export function Whiteboard() {
               </svg>
               <span className="hidden md:inline">Export</span>
               <svg
-                className="w-3 h-3 hidden md:inline-block"
+                className="hidden h-3 w-3 md:inline-block"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -441,14 +707,15 @@ export function Whiteboard() {
                 />
               </svg>
             </button>
+
             {showExportMenu && (
-              <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
+              <div className="absolute right-0 z-50 mt-1 w-40 rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
                 <button
                   onClick={handleExportJSON}
-                  className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                 >
                   <svg
-                    className="w-4 h-4"
+                    className="h-4 w-4"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -464,10 +731,10 @@ export function Whiteboard() {
                 </button>
                 <button
                   onClick={handleExportPNG}
-                  className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                 >
                   <svg
-                    className="w-4 h-4"
+                    className="h-4 w-4"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -481,13 +748,13 @@ export function Whiteboard() {
                   </svg>
                   Export PNG
                 </button>
-                <div className="border-t border-gray-200 my-1" />
+                <div className="my-1 border-t border-gray-200" />
                 <button
                   onClick={handleImportClick}
-                  className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                 >
                   <svg
-                    className="w-4 h-4"
+                    className="h-4 w-4"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -503,6 +770,7 @@ export function Whiteboard() {
                 </button>
               </div>
             )}
+
             <input
               ref={fileInputRef}
               type="file"
@@ -511,90 +779,267 @@ export function Whiteboard() {
               className="hidden"
             />
           </div>
+
           <button
             onClick={leaveRoom}
-            className="px-4 py-2 text-sm text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors font-medium"
+            className="rounded-lg px-4 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-red-50 hover:text-red-600"
           >
             Leave
           </button>
         </div>
       </header>
 
-      <main className="flex-1 flex flex-col p-4 gap-4 min-h-0">
-        <div className="flex justify-center flex-shrink-0">
-          <Toolbar
-            drawingState={drawingState}
-            onToolChange={handleToolChange}
-            onColorChange={handleColorChange}
-            onSizeChange={handleSizeChange}
-            onClear={handleClear}
-            onUndo={undo}
-            onRedo={redo}
-            canUndo={canUndo}
-            canRedo={canRedo}
-          />
+      <main className="flex flex-1 flex-col gap-4 p-4 min-h-0">
+        <div className="flex flex-shrink-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex justify-center xl:flex-1 xl:justify-start">
+            <Toolbar
+              drawingState={drawingState}
+              onToolChange={handleToolChange}
+              onColorChange={handleColorChange}
+              onSizeChange={handleSizeChange}
+              onClear={handleClear}
+              onUndo={undo}
+              onRedo={redo}
+              canUndo={canUndo}
+              canRedo={canRedo}
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-gray-200 bg-white/90 p-2 shadow-sm backdrop-blur-sm">
+            {REACTION_OPTIONS.map((reactionOption) => {
+              const isActive = activeReactionKind === reactionOption.kind;
+
+              return (
+                <button
+                  key={reactionOption.kind}
+                  onClick={() => handleReactionToggle(reactionOption.kind)}
+                  className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition-all ${
+                    isActive
+                      ? "bg-primary-600 text-white shadow-sm"
+                      : "bg-gray-50 text-gray-700 hover:bg-gray-100"
+                  }`}
+                  title={reactionOption.description}
+                >
+                  <span className="text-xs font-semibold">
+                    {reactionOption.badge}
+                  </span>
+                  <span>{reactionOption.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        <div className="relative flex-1 min-h-0 h-full">
-          <Canvas
-            ref={canvasRef}
-            strokes={roomState.strokes}
-            elements={roomState.elements || []}
-            drawingState={drawingState}
-            userId={currentUser.id}
-            onStrokeComplete={handleStrokeComplete}
-            onElementAdd={handleElementAdd}
-            onElementUpdate={updateElement}
-            onElementDelete={deleteElement}
-            onSelectionMutationStart={captureHistorySnapshot}
-            onSelectionMutationEnd={commitCapturedHistory}
-            onDrawStart={handleDrawStart}
-            onMouseMove={handleMouseMove}
-            cursors={cursors}
-          />
-          {/* Empty state */}
-          {roomState.strokes.length === 0 &&
-            (!roomState.elements || roomState.elements.length === 0) && (
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="text-center">
-                  <svg
-                    className="w-16 h-16 text-gray-300 mx-auto mb-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={1.5}
-                      d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
-                    />
-                  </svg>
-                  <p className="text-gray-400 text-lg font-medium">
-                    Start drawing or add elements
+        <div className="flex flex-1 min-h-0 flex-col gap-4 xl:flex-row">
+          <div className="relative flex-1 min-h-[320px] xl:min-h-0">
+            {connectionStatus !== "connected" && (
+              <div className="absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full border border-amber-200 bg-white/95 px-4 py-2 text-sm font-medium text-gray-700 shadow-lg backdrop-blur-sm">
+                {connectionCopy.detail}
+              </div>
+            )}
+
+            <Canvas
+              ref={canvasRef}
+              strokes={roomState.strokes}
+              elements={roomState.elements || []}
+              drawingState={drawingState}
+              userId={currentUser.id}
+              onStrokeComplete={handleStrokeComplete}
+              onElementAdd={handleElementAdd}
+              onElementUpdate={updateElement}
+              onElementDelete={deleteElement}
+              onSelectionMutationStart={captureHistorySnapshot}
+              onSelectionMutationEnd={commitCapturedHistory}
+              onDrawStart={handleDrawStart}
+              onMouseMove={handleMouseMove}
+              cursors={cursors}
+              reactions={reactions}
+              activeReactionKind={activeReactionKind}
+              onReactionAdd={handleReactionAdd}
+              followCursor={followedCursor}
+              followUserName={followedUser?.name ?? null}
+            />
+
+            {roomState.strokes.length === 0 &&
+              (!roomState.elements || roomState.elements.length === 0) && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <div className="text-center">
+                    <svg
+                      className="mx-auto mb-4 h-16 w-16 text-gray-300"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={1.5}
+                        d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                      />
+                    </svg>
+                    <p className="text-lg font-medium text-gray-400">
+                      Start drawing or add elements
+                    </p>
+                    <p className="mt-1 text-sm text-gray-300">
+                      Use the toolbar above to pick a tool or drop a quick
+                      reaction.
+                    </p>
+                  </div>
+                </div>
+              )}
+          </div>
+
+          <aside className="flex w-full flex-col gap-4 xl:w-[320px] xl:max-h-full">
+            <section className="rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary-500">
+                    Room Health
                   </p>
-                  <p className="text-gray-300 text-sm mt-1">
-                    Use the toolbar above to select a tool
+                  <h2 className="mt-1 text-lg font-semibold text-gray-900">
+                    {connectionCopy.label}
+                  </h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    {connectionCopy.detail}
+                  </p>
+                </div>
+                <span className={`mt-1 h-3 w-3 rounded-full ${connectionCopy.dot}`} />
+              </div>
+
+              <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className="rounded-xl bg-gray-50 px-3 py-2">
+                  <p className="text-xs text-gray-500">Drawing</p>
+                  <p className="text-lg font-semibold text-gray-900">
+                    {participantStats.drawing}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-gray-50 px-3 py-2">
+                  <p className="text-xs text-gray-500">Online</p>
+                  <p className="text-lg font-semibold text-gray-900">
+                    {participantStats.online}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-gray-50 px-3 py-2">
+                  <p className="text-xs text-gray-500">Idle</p>
+                  <p className="text-lg font-semibold text-gray-900">
+                    {participantStats.idle}
                   </p>
                 </div>
               </div>
-            )}
+
+              <div className="mt-4 rounded-xl border border-dashed border-gray-200 bg-gray-50 px-3 py-3">
+                <p className="text-sm font-medium text-gray-700">
+                  {followedUser
+                    ? `Currently following ${followedUser.name}.`
+                    : activeReactionKind
+                      ? `Reaction mode: ${
+                          REACTION_OPTIONS.find(
+                            (reactionOption) =>
+                              reactionOption.kind === activeReactionKind,
+                          )?.label ?? "Reaction"
+                        }.`
+                      : "Jump or follow a collaborator from the list below."}
+                </p>
+              </div>
+            </section>
+
+            <section className="flex min-h-0 flex-col rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary-500">
+                    Participants
+                  </p>
+                  <h2 className="mt-1 text-lg font-semibold text-gray-900">
+                    Room Presence
+                  </h2>
+                </div>
+                <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-600">
+                  {participants.length}
+                </span>
+              </div>
+
+              <div className="mt-4 flex-1 space-y-3 overflow-y-auto pr-1">
+                {participants.map((user) => {
+                  const color = getUserColor(user.clientId);
+                  const presenceMeta = getPresenceMeta(user.status);
+                  const liveCursor = cursors.get(user.id);
+                  const isCurrentUser = user.id === currentUser.id;
+                  const isFollowing = followedUserId === user.id;
+
+                  return (
+                    <div
+                      key={user.id}
+                      className="rounded-2xl border border-gray-200 bg-gray-50/70 p-3"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div
+                          className={`flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl text-sm font-semibold text-white shadow-sm ${color.bg}`}
+                        >
+                          {getUserInitials(user.name)}
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="truncate text-sm font-semibold text-gray-900">
+                              {user.name}
+                              {isCurrentUser ? " (You)" : ""}
+                            </p>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${presenceMeta.tone}`}
+                            >
+                              {presenceMeta.label}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-gray-500">
+                            {liveCursor
+                              ? "Live cursor shared on the board"
+                              : presenceMeta.detail}
+                          </p>
+                        </div>
+                      </div>
+
+                      {!isCurrentUser && (
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            onClick={() => handleJumpToUser(user)}
+                            disabled={!liveCursor}
+                            className="flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:text-gray-300"
+                          >
+                            Jump
+                          </button>
+                          <button
+                            onClick={() => handleFollowToggle(user)}
+                            disabled={!liveCursor}
+                            className={`flex-1 rounded-xl px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-300 ${
+                              isFollowing
+                                ? "bg-primary-600 text-white hover:bg-primary-700"
+                                : "bg-gray-900 text-white hover:bg-gray-800"
+                            }`}
+                          >
+                            {isFollowing ? "Stop" : "Follow"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          </aside>
         </div>
       </main>
 
-      {/* Toast notification */}
       {showToast && (
-        <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 px-4 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg z-50 animate-fade-in">
+        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">
           {showToast}
         </div>
       )}
 
-      {/* Export loading overlay */}
       {isExporting && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 flex items-center gap-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="flex items-center gap-3 rounded-lg bg-white p-6">
             <svg
-              className="animate-spin h-5 w-5 text-primary-600"
+              className="h-5 w-5 animate-spin text-primary-600"
               xmlns="http://www.w3.org/2000/svg"
               fill="none"
               viewBox="0 0 24 24"
@@ -606,19 +1051,18 @@ export function Whiteboard() {
                 r="10"
                 stroke="currentColor"
                 strokeWidth="4"
-              ></circle>
+              />
               <path
                 className="opacity-75"
                 fill="currentColor"
                 d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-              ></path>
+              />
             </svg>
-            <span className="text-gray-700 font-medium">Exporting...</span>
+            <span className="font-medium text-gray-700">Exporting...</span>
           </div>
         </div>
       )}
 
-      {/* Click outside to close export menu */}
       {showExportMenu && (
         <div
           className="fixed inset-0 z-40"
@@ -626,27 +1070,26 @@ export function Whiteboard() {
         />
       )}
 
-      {/* Clear confirmation dialog */}
       {showClearConfirm && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-sm mx-4">
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="mx-4 max-w-sm rounded-lg bg-white p-6">
+            <h3 className="mb-2 text-lg font-semibold text-gray-900">
               Clear Canvas?
             </h3>
-            <p className="text-gray-600 mb-6">
+            <p className="mb-6 text-gray-600">
               This will remove all drawings and elements. This action cannot be
               undone.
             </p>
-            <div className="flex gap-3 justify-end">
+            <div className="flex justify-end gap-3">
               <button
                 onClick={() => setShowClearConfirm(false)}
-                className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors font-medium"
+                className="rounded-lg px-4 py-2 font-medium text-gray-700 transition-colors hover:bg-gray-100"
               >
                 Cancel
               </button>
               <button
                 onClick={confirmClear}
-                className="px-4 py-2 bg-red-600 text-white hover:bg-red-700 rounded-lg transition-colors font-medium"
+                className="rounded-lg bg-red-600 px-4 py-2 font-medium text-white transition-colors hover:bg-red-700"
               >
                 Clear Canvas
               </button>

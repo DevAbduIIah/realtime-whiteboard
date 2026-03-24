@@ -13,7 +13,9 @@ import {
   disconnectSocket,
   TypedSocket,
 } from "../utils/socket";
+import { getOrCreateClientId } from "../utils/presence";
 import type {
+  BoardReaction,
   User,
   RoomState,
   DrawStroke,
@@ -49,9 +51,12 @@ interface SocketContextValue {
   isConnected: boolean;
   isReconnecting: boolean;
   connectionStatus: "connected" | "disconnected" | "reconnecting";
+  reconnectAttempt: number;
+  lastRejoinedAt: number | null;
   currentUser: User | null;
   roomState: RoomState | null;
   cursors: Map<string, CursorPosition>;
+  reactions: BoardReaction[];
   canUndo: boolean;
   canRedo: boolean;
   joinRoom: (roomId: string, userName: string) => void;
@@ -59,6 +64,7 @@ interface SocketContextValue {
   sendStroke: (stroke: DrawStroke, options?: MutationOptions) => void;
   sendClear: () => void;
   sendCursorMove: (x: number, y: number, status?: PresenceStatus) => void;
+  sendReaction: (reaction: BoardReaction) => void;
   sendElement: (element: WhiteboardElement, options?: MutationOptions) => void;
   updateElement: (
     elementId: string,
@@ -74,6 +80,7 @@ interface SocketContextValue {
 const SocketContext = createContext<SocketContextValue | null>(null);
 
 const MAX_HISTORY = 50;
+const REACTION_TTL = 4500;
 
 function cloneStroke(stroke: DrawStroke): DrawStroke {
   return {
@@ -86,25 +93,45 @@ function cloneElement<T extends WhiteboardElement>(element: T): T {
   return { ...element };
 }
 
+function mergeUsers(users: User[], nextUser: User): User[] {
+  const existingIndex = users.findIndex(
+    (user) => user.id === nextUser.id || user.clientId === nextUser.clientId,
+  );
+
+  if (existingIndex === -1) {
+    return [...users, nextUser];
+  }
+
+  const nextUsers = [...users];
+  nextUsers[existingIndex] = nextUser;
+  return nextUsers;
+}
+
 export function SocketProvider({ children }: { children: ReactNode }) {
+  const clientIdRef = useRef(getOrCreateClientId());
   const [socket] = useState(() => getSocket());
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<
     "connected" | "disconnected" | "reconnecting"
   >("disconnected");
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [lastRejoinedAt, setLastRejoinedAt] = useState<number | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [cursors, setCursors] = useState<Map<string, CursorPosition>>(
     new Map(),
   );
+  const [reactions, setReactions] = useState<BoardReaction[]>([]);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
 
   const roomStateRef = useRef<RoomState | null>(null);
+  const currentUserRef = useRef<User | null>(null);
   const lastRoomInfoRef = useRef<{ roomId: string; userName: string } | null>(
     null,
   );
+  const awaitingRoomRejoinRef = useRef(false);
   const processedStrokesRef = useRef<Set<string>>(new Set());
   const processedElementsRef = useRef<Set<string>>(new Set());
   const historyRef = useRef<HistoryEntry[]>([]);
@@ -118,6 +145,20 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     roomStateRef.current = roomState;
   }, [roomState]);
+
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setReactions((prev) =>
+        prev.filter((reaction) => Date.now() - reaction.createdAt < REACTION_TTL),
+      );
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, []);
 
   const syncHistoryFlags = useCallback(() => {
     setCanUndo(historyIndexRef.current >= 0);
@@ -233,6 +274,66 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const setUserLocal = useCallback((user: User) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        users: mergeUsers(prev.users, user),
+      };
+    });
+
+    if (currentUserRef.current?.clientId === user.clientId) {
+      setCurrentUser(user);
+    }
+  }, []);
+
+  const removeUserLocal = useCallback((userId: string) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        users: prev.users.filter((user) => user.id !== userId),
+      };
+    });
+
+    if (currentUserRef.current?.id === userId) {
+      setCurrentUser((prev) => (prev?.id === userId ? null : prev));
+    }
+  }, []);
+
+  const updateCurrentUserPresenceLocal = useCallback((status: PresenceStatus) => {
+    const activeUser = currentUserRef.current;
+    if (!activeUser) {
+      return;
+    }
+
+    const nextUser: User = {
+      ...activeUser,
+      status,
+      lastActiveAt: Date.now(),
+    };
+
+    currentUserRef.current = nextUser;
+    setCurrentUser(nextUser);
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        users: mergeUsers(prev.users, nextUser),
+      };
+    });
+  }, []);
+
+  const addReactionLocal = useCallback((reaction: BoardReaction) => {
+    setReactions((prev) => {
+      const nextReactions = prev.filter(
+        (existingReaction) => existingReaction.id !== reaction.id,
+      );
+      return [...nextReactions, reaction];
+    });
+  }, []);
+
   const emitStrokeAdd = useCallback(
     (stroke: DrawStroke) => {
       socket.emit("draw:stroke", { stroke });
@@ -326,28 +427,45 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     function onConnect() {
       setIsConnected(true);
-      setIsReconnecting(false);
-      setConnectionStatus("connected");
 
       if (lastRoomInfoRef.current) {
-        socket.emit("room:join", lastRoomInfoRef.current);
+        setIsReconnecting(true);
+        setConnectionStatus("reconnecting");
+        socket.emit("room:join", {
+          ...lastRoomInfoRef.current,
+          clientId: clientIdRef.current,
+        });
+        return;
       }
+
+      setIsReconnecting(false);
+      setConnectionStatus("connected");
     }
 
     function onDisconnect() {
       setIsConnected(false);
-      setConnectionStatus("disconnected");
       setCursors(new Map());
+
+      if (lastRoomInfoRef.current) {
+        awaitingRoomRejoinRef.current = true;
+        setIsReconnecting(true);
+        setConnectionStatus("reconnecting");
+        return;
+      }
+
+      setConnectionStatus("disconnected");
     }
 
-    function onReconnectAttempt() {
+    function onReconnectAttempt(attempt: number) {
       setIsReconnecting(true);
       setConnectionStatus("reconnecting");
+      setReconnectAttempt(attempt);
     }
 
     function onReconnectFailed() {
       setIsReconnecting(false);
       setConnectionStatus("disconnected");
+      setReconnectAttempt(0);
     }
 
     function onRoomJoined(data: { user: User; roomState: RoomState }) {
@@ -356,9 +474,21 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         elements: data.roomState.elements || [],
       };
 
+      const didRejoin = awaitingRoomRejoinRef.current;
+
+      currentUserRef.current = data.user;
       setCurrentUser(data.user);
       setRoomState(normalizedRoomState);
       roomStateRef.current = normalizedRoomState;
+      setReactions([]);
+      setIsReconnecting(false);
+      setConnectionStatus("connected");
+      setReconnectAttempt(0);
+
+      if (didRejoin) {
+        setLastRejoinedAt(Date.now());
+      }
+      awaitingRoomRejoinRef.current = false;
 
       lastRoomInfoRef.current = {
         roomId: data.user.roomId,
@@ -376,26 +506,15 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     }
 
     function onUserJoined(user: User) {
-      setRoomState((prev) => {
-        if (!prev || prev.users.some((existingUser) => existingUser.id === user.id)) {
-          return prev;
-        }
+      setUserLocal(user);
+    }
 
-        return {
-          ...prev,
-          users: [...prev.users, user],
-        };
-      });
+    function onUserUpdated(user: User) {
+      setUserLocal(user);
     }
 
     function onUserLeft(userId: string) {
-      setRoomState((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          users: prev.users.filter((user) => user.id !== userId),
-        };
-      });
+      removeUserLocal(userId);
 
       setCursors((prev) => {
         const next = new Map(prev);
@@ -488,12 +607,17 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       });
     }
 
+    function onReactionAdd(reaction: BoardReaction) {
+      addReactionLocal(reaction);
+    }
+
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
     socket.io.on("reconnect_attempt", onReconnectAttempt);
     socket.io.on("reconnect_failed", onReconnectFailed);
     socket.on("room:joined", onRoomJoined);
     socket.on("room:user-joined", onUserJoined);
+    socket.on("room:user-updated", onUserUpdated);
     socket.on("room:user-left", onUserLeft);
     socket.on("draw:stroke", onStroke);
     socket.on("draw:stroke-delete", onStrokeDelete);
@@ -504,6 +628,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     socket.on("board:replace", onBoardReplace);
     socket.on("cursor:update", onCursorUpdate);
     socket.on("cursor:remove", onCursorRemove);
+    socket.on("reaction:add", onReactionAdd);
 
     return () => {
       socket.off("connect", onConnect);
@@ -512,6 +637,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       socket.io.off("reconnect_failed", onReconnectFailed);
       socket.off("room:joined", onRoomJoined);
       socket.off("room:user-joined", onUserJoined);
+      socket.off("room:user-updated", onUserUpdated);
       socket.off("room:user-left", onUserLeft);
       socket.off("draw:stroke", onStroke);
       socket.off("draw:stroke-delete", onStrokeDelete);
@@ -522,13 +648,26 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       socket.off("board:replace", onBoardReplace);
       socket.off("cursor:update", onCursorUpdate);
       socket.off("cursor:remove", onCursorRemove);
+      socket.off("reaction:add", onReactionAdd);
       disconnectSocket();
     };
-  }, [addElementLocal, addStrokeLocal, deleteElementLocal, deleteStrokeLocal, resetHistory, setElementLocal, socket]);
+  }, [
+    addElementLocal,
+    addReactionLocal,
+    addStrokeLocal,
+    deleteElementLocal,
+    deleteStrokeLocal,
+    removeUserLocal,
+    resetHistory,
+    setElementLocal,
+    setUserLocal,
+    socket,
+  ]);
 
   const joinRoom = useCallback(
     (roomId: string, userName: string) => {
-      socket.emit("room:join", { roomId, userName });
+      lastRoomInfoRef.current = { roomId, userName };
+      socket.emit("room:join", { roomId, userName, clientId: clientIdRef.current });
     },
     [socket],
   );
@@ -538,9 +677,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     lastRoomInfoRef.current = null;
     processedStrokesRef.current.clear();
     processedElementsRef.current.clear();
+    awaitingRoomRejoinRef.current = false;
+    setReconnectAttempt(0);
+    setLastRejoinedAt(null);
+    currentUserRef.current = null;
     setCurrentUser(null);
     setRoomState(null);
     setCursors(new Map());
+    setReactions([]);
     resetHistory();
   }, [resetHistory, socket]);
 
@@ -597,9 +741,32 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   const sendCursorMove = useCallback(
     (x: number, y: number, status?: PresenceStatus) => {
-      socket.emit("cursor:move", { x, y, status });
+      const nextStatus = status || "online";
+      updateCurrentUserPresenceLocal(nextStatus);
+      socket.emit("cursor:move", { x, y, status: nextStatus });
     },
-    [socket],
+    [socket, updateCurrentUserPresenceLocal],
+  );
+
+  const sendReaction = useCallback(
+    (reaction: BoardReaction) => {
+      const activeUser = currentUserRef.current;
+      if (!activeUser) {
+        return;
+      }
+
+      const nextReaction: BoardReaction = {
+        ...reaction,
+        userId: activeUser.id,
+        clientId: activeUser.clientId,
+        userName: activeUser.name,
+        createdAt: reaction.createdAt || Date.now(),
+      };
+
+      addReactionLocal(nextReaction);
+      socket.emit("reaction:add", { reaction: nextReaction });
+    },
+    [addReactionLocal, socket],
   );
 
   const sendElement = useCallback(
@@ -739,9 +906,12 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         isConnected,
         isReconnecting,
         connectionStatus,
+        reconnectAttempt,
+        lastRejoinedAt,
         currentUser,
         roomState,
         cursors,
+        reactions,
         canUndo,
         canRedo,
         joinRoom,
@@ -749,6 +919,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         sendStroke,
         sendClear,
         sendCursorMove,
+        sendReaction,
         sendElement,
         updateElement,
         deleteElement,

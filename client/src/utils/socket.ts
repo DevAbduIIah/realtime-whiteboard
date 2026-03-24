@@ -1,5 +1,13 @@
 import { io, Socket } from 'socket.io-client';
-import type { DrawStroke, CursorPosition, User, RoomState, PresenceStatus, WhiteboardElement } from '../types';
+import type {
+  BoardReaction,
+  DrawStroke,
+  CursorPosition,
+  User,
+  RoomState,
+  PresenceStatus,
+  WhiteboardElement,
+} from '../types';
 
 interface BoardStatePayload {
   strokes: DrawStroke[];
@@ -10,9 +18,14 @@ interface StrokeDeletePayload {
   strokeId: string;
 }
 
+interface ReactionPayload {
+  reaction: BoardReaction;
+}
+
 interface ServerToClientEvents {
   'room:joined': (data: { user: User; roomState: RoomState }) => void;
   'room:user-joined': (user: User) => void;
+  'room:user-updated': (user: User) => void;
   'room:user-left': (userId: string) => void;
   'draw:stroke': (stroke: DrawStroke) => void;
   'draw:stroke-delete': (strokeId: string) => void;
@@ -23,11 +36,12 @@ interface ServerToClientEvents {
   'board:replace': (payload: BoardStatePayload) => void;
   'cursor:update': (cursor: CursorPosition) => void;
   'cursor:remove': (userId: string) => void;
+  'reaction:add': (reaction: BoardReaction) => void;
   error: (message: string) => void;
 }
 
 interface ClientToServerEvents {
-  'room:join': (payload: { roomId: string; userName: string }) => void;
+  'room:join': (payload: { roomId: string; userName: string; clientId: string }) => void;
   'room:leave': () => void;
   'draw:stroke': (payload: { stroke: DrawStroke }) => void;
   'draw:stroke-delete': (payload: StrokeDeletePayload) => void;
@@ -37,6 +51,7 @@ interface ClientToServerEvents {
   'element:delete': (payload: { elementId: string }) => void;
   'board:replace': (payload: BoardStatePayload) => void;
   'cursor:move': (payload: { x: number; y: number; status?: PresenceStatus }) => void;
+  'reaction:add': (payload: ReactionPayload) => void;
 }
 
 export type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;

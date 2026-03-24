@@ -1,9 +1,9 @@
 import { Server, Socket } from 'socket.io';
 import type {
+  BoardReaction,
   ServerToClientEvents,
   ClientToServerEvents,
   User,
-  DrawStroke,
   RoomState,
   WhiteboardElement,
 } from '../types/index.js';
@@ -78,17 +78,21 @@ export function setupSocketHandlers(io: TypedServer): void {
   io.on('connection', (socket: TypedSocket) => {
     console.log(`Client connected: ${socket.id}`);
 
-    socket.on('room:join', ({ roomId, userName }) => {
+    socket.on('room:join', ({ roomId, userName, clientId }) => {
       // Handle case where user is already in the room (reconnect scenario)
       const existingUser = userSockets.get(socket.id);
       if (existingUser) {
         handleUserLeave(socket, io);
       }
 
+      const now = Date.now();
       const user: User = {
         id: socket.id,
+        clientId,
         name: userName,
         roomId,
+        status: 'online',
+        lastActiveAt: now,
       };
 
       userSockets.set(socket.id, user);
@@ -96,12 +100,19 @@ export function setupSocketHandlers(io: TypedServer): void {
 
       const roomState = getOrCreateRoom(roomId);
 
-      // Check if user with same name already exists (duplicate check)
-      const existingUserIndex = roomState.users.findIndex(u => u.id === socket.id);
+      const existingUserIndex = roomState.users.findIndex(
+        (roomUser) => roomUser.clientId === clientId,
+      );
+
+      let previousSocketId: string | null = null;
       if (existingUserIndex === -1) {
         roomState.users.push(user);
       } else {
+        previousSocketId = roomState.users[existingUserIndex].id;
         roomState.users[existingUserIndex] = user;
+        if (previousSocketId !== socket.id) {
+          userSockets.delete(previousSocketId);
+        }
       }
 
       // Send room state without Set objects (can't serialize)
@@ -114,7 +125,14 @@ export function setupSocketHandlers(io: TypedServer): void {
         },
       });
 
-      socket.to(roomId).emit('room:user-joined', user);
+      if (existingUserIndex === -1) {
+        socket.to(roomId).emit('room:user-joined', user);
+      } else {
+        socket.to(roomId).emit('room:user-updated', user);
+        if (previousSocketId && previousSocketId !== user.id) {
+          socket.to(roomId).emit('cursor:remove', previousSocketId);
+        }
+      }
 
       console.log(`${userName} joined room: ${roomId} (${roomState.users.length} users)`);
     });
@@ -263,13 +281,49 @@ export function setupSocketHandlers(io: TypedServer): void {
       const user = userSockets.get(socket.id);
       if (!user) return;
 
+      const roomState = rooms.get(user.roomId);
+      const nextStatus = status || 'online';
+
+      if (roomState) {
+        const userIndex = roomState.users.findIndex((roomUser) => roomUser.id === user.id);
+        if (userIndex !== -1) {
+          const nextUser: User = {
+            ...roomState.users[userIndex],
+            status: nextStatus,
+            lastActiveAt: Date.now(),
+          };
+          roomState.users[userIndex] = nextUser;
+          userSockets.set(socket.id, nextUser);
+
+          if (nextUser.status !== user.status) {
+            io.to(user.roomId).emit('room:user-updated', nextUser);
+          }
+        }
+      }
+
       socket.to(user.roomId).emit('cursor:update', {
         x,
         y,
         userId: user.id,
+        clientId: user.clientId,
         userName: user.name,
-        status: status || 'online',
+        status: nextStatus,
       });
+    });
+
+    socket.on('reaction:add', ({ reaction }) => {
+      const user = userSockets.get(socket.id);
+      if (!user) return;
+
+      const nextReaction: BoardReaction = {
+        ...reaction,
+        userId: user.id,
+        clientId: user.clientId,
+        userName: user.name,
+        createdAt: reaction.createdAt || Date.now(),
+      };
+
+      socket.to(user.roomId).emit('reaction:add', nextReaction);
     });
 
     socket.on('disconnect', () => {

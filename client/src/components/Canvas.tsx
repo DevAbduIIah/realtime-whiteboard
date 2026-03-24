@@ -22,10 +22,12 @@ import {
   translateElement,
 } from "../utils/elementGeometry";
 import type {
+  BoardReaction,
   CursorPosition,
   DrawStroke,
   DrawingState,
   Point,
+  ReactionKind,
   ResizeHandle,
   SelectionMode,
   ShapeElement,
@@ -59,6 +61,11 @@ interface CanvasProps {
   onDrawStart?: () => void;
   onMouseMove?: (x: number, y: number, isDrawing: boolean) => void;
   cursors?: Map<string, CursorPosition>;
+  reactions?: BoardReaction[];
+  activeReactionKind?: ReactionKind | null;
+  onReactionAdd?: (reaction: BoardReaction) => void;
+  followCursor?: CursorPosition | null;
+  followUserName?: string | null;
 }
 
 export interface CanvasHandle {
@@ -70,6 +77,7 @@ export interface CanvasHandle {
   getExportCanvas: () => HTMLCanvasElement | null;
   hasSelection: () => boolean;
   isEditingText: () => boolean;
+  jumpToPoint: (point: Point, zoom?: number) => void;
   pasteClipboard: () => boolean;
 }
 
@@ -261,6 +269,40 @@ function getResizeCursor(handle: ResizeHandle | null): string {
       return "nwse-resize";
     default:
       return "nwse-resize";
+  }
+}
+
+function getReactionMeta(kind: ReactionKind): {
+  badge: string;
+  label: string;
+  caption: string;
+} {
+  switch (kind) {
+    case "thumbs":
+      return {
+        badge: "+1",
+        label: "Appreciation",
+        caption: "sent appreciation",
+      };
+    case "celebrate":
+      return {
+        badge: "*",
+        label: "Celebrate",
+        caption: "celebrated",
+      };
+    case "question":
+      return {
+        badge: "?",
+        label: "Question",
+        caption: "asked a question",
+      };
+    case "ping":
+    default:
+      return {
+        badge: "!",
+        label: "Ping",
+        caption: "pinged this spot",
+      };
   }
 }
 
@@ -548,6 +590,11 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     onDrawStart,
     onMouseMove,
     cursors = new Map(),
+    reactions = [],
+    activeReactionKind = null,
+    onReactionAdd,
+    followCursor = null,
+    followUserName = null,
   },
   ref,
 ) {
@@ -772,6 +819,25 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       container.clientHeight / 2,
     );
   }, [viewState.zoom, zoomAtPoint]);
+
+  const centerViewOnPoint = useCallback((point: Point, nextZoom?: number) => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    hasViewportInteractionRef.current = true;
+    hasInitializedViewportRef.current = true;
+
+    setViewState((previousState) => {
+      const resolvedZoom = clampZoom(nextZoom ?? previousState.zoom);
+      return {
+        zoom: resolvedZoom,
+        panX: container.clientWidth / 2 - point.x * resolvedZoom,
+        panY: container.clientHeight / 2 - point.y * resolvedZoom,
+      };
+    });
+  }, []);
 
   const clearPendingSync = useCallback(() => {
     if (syncTimeoutRef.current) {
@@ -1040,6 +1106,14 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     }
   }, [clearSelection, isSelectTool]);
 
+  useEffect(() => {
+    if (!followCursor) {
+      return;
+    }
+
+    centerViewOnPoint({ x: followCursor.x, y: followCursor.y });
+  }, [centerViewOnPoint, followCursor]);
+
   const drawSelectionOverlay = useCallback(
     (ctx: CanvasRenderingContext2D) => {
       if (selectionBounds) {
@@ -1273,10 +1347,12 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       },
       hasSelection: () => selectedElementIds.length > 0,
       isEditingText: () => textInput.visible,
+      jumpToPoint: (point: Point, zoom?: number) => centerViewOnPoint(point, zoom),
       pasteClipboard,
     }),
     [
       canvasRef,
+      centerViewOnPoint,
       clearSelection,
       copySelection,
       deleteSelection,
@@ -1430,6 +1506,20 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     }
 
     const point = getCanvasPoint(e);
+
+    if (activeReactionKind && onReactionAdd) {
+      onReactionAdd({
+        id: generateId(),
+        x: point.x,
+        y: point.y,
+        kind: activeReactionKind,
+        userId,
+        clientId: userId,
+        userName: "",
+        createdAt: Date.now(),
+      });
+      return;
+    }
 
     if (isSelectTool) {
       handleSelectMouseDown(point, e.shiftKey);
@@ -1706,6 +1796,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       return getResizeCursor(activeResizeHandle);
     }
 
+    if (activeReactionKind) {
+      return "crosshair";
+    }
+
     switch (drawingState.tool) {
       case "select":
         return selectedElementIds.length > 0 ? "move" : "default";
@@ -1792,7 +1886,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       {Array.from(cursors.entries()).map(([cursorUserId, cursor]) => {
         if (cursorUserId === userId) return null;
 
-        const userColor = getUserColor(cursorUserId);
+        const userColor = getUserColor(cursor.clientId);
         const isUserDrawing = cursor.status === "drawing";
         const screenPoint = worldToScreen(
           { x: cursor.x, y: cursor.y },
@@ -1836,6 +1930,67 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           </div>
         );
       })}
+
+      {reactions.map((reaction) => {
+        const userColor = getUserColor(reaction.clientId);
+        const reactionMeta = getReactionMeta(reaction.kind);
+        const screenPoint = worldToScreen(
+          { x: reaction.x, y: reaction.y },
+          viewState,
+        );
+        const isPing = reaction.kind === "ping";
+
+        return (
+          <div
+            key={reaction.id}
+            className="absolute pointer-events-none"
+            style={{
+              left: screenPoint.x,
+              top: screenPoint.y,
+              transform: "translate(-50%, -50%)",
+            }}
+          >
+            {isPing ? (
+              <div className="relative flex items-center justify-center">
+                <span
+                  className={`absolute h-16 w-16 rounded-full opacity-25 animate-ping ${userColor.bg}`}
+                />
+                <span
+                  className={`relative flex h-12 w-12 items-center justify-center rounded-full border-2 border-white text-lg font-semibold text-white shadow-xl ${userColor.bg}`}
+                >
+                  {reactionMeta.badge}
+                </span>
+              </div>
+            ) : (
+              <div
+                className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 border-white text-lg font-semibold text-white shadow-xl animate-bounce ${userColor.bg}`}
+              >
+                {reactionMeta.badge}
+              </div>
+            )}
+            <span className="mt-2 inline-flex rounded-full bg-white/95 px-2.5 py-1 text-xs font-medium text-gray-700 shadow-sm">
+              {reaction.userName} {reactionMeta.caption}
+            </span>
+          </div>
+        );
+      })}
+
+      {followUserName && (
+        <div className="absolute left-4 top-4 rounded-xl border border-primary-100 bg-white/95 px-3 py-2 shadow-lg backdrop-blur-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary-500">
+            Follow Mode
+          </p>
+          <p className="text-sm font-medium text-gray-700">
+            Centering on {followUserName}
+          </p>
+        </div>
+      )}
+
+      {activeReactionKind && (
+        <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full border border-primary-100 bg-white/95 px-4 py-2 text-sm font-medium text-gray-700 shadow-lg backdrop-blur-sm">
+          Click anywhere on the board to place a {getReactionMeta(activeReactionKind).label.toLowerCase()}.
+        </div>
+      )}
 
       <div className="absolute bottom-4 right-4 flex items-center gap-2 rounded-xl bg-white/95 px-3 py-2 shadow-lg border border-gray-200 backdrop-blur-sm">
         <button

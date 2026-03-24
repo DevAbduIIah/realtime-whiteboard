@@ -58,25 +58,41 @@ export interface ShapeElement {
 export type WhiteboardElement = TextElement | StickyElement | ShapeElement;
 
 export type PresenceStatus = 'online' | 'drawing' | 'idle';
+export type ReactionKind = 'ping' | 'thumbs' | 'celebrate' | 'question';
 
 export interface CursorPosition {
   x: number;
   y: number;
   userId: string;
+  clientId: string;
   userName: string;
   status?: PresenceStatus;
 }
 
 export interface User {
   id: string;
+  clientId: string;
   name: string;
   roomId: string;
+  status: PresenceStatus;
+  lastActiveAt: number;
 }
 
 export interface RoomState {
   strokes: DrawStroke[];
   elements: WhiteboardElement[];
   users: User[];
+}
+
+export interface BoardReaction {
+  id: string;
+  x: number;
+  y: number;
+  kind: ReactionKind;
+  userId: string;
+  clientId: string;
+  userName: string;
+  createdAt: number;
 }
 
 export interface DrawingState {
