@@ -81,7 +81,32 @@ export interface User {
   lastActiveAt: number;
 }
 
+export interface BoardMetadata {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  ownerId?: string;
+  accessLevel: 'public' | 'private';
+  shareLink?: string;
+}
+
+export interface BoardSnapshot {
+  revision: number;
+  createdAt: string;
+  strokes: DrawStroke[];
+  elements: WhiteboardElement[];
+}
+
+export interface BoardContent {
+  strokes: DrawStroke[];
+  elements: WhiteboardElement[];
+  snapshots?: BoardSnapshot[];
+}
+
 export interface RoomState {
+  metadata: BoardMetadata;
   strokes: DrawStroke[];
   elements: WhiteboardElement[];
   users: User[];

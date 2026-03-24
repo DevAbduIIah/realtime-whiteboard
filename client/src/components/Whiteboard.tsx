@@ -447,6 +447,7 @@ export function Whiteboard() {
         roomState.strokes,
         roomState.elements || [],
         `whiteboard-${currentUser.roomId}`,
+        roomState.metadata,
       );
       setShowExportMenu(false);
       showToastMessage("Exported board as JSON.");
@@ -493,7 +494,7 @@ export function Whiteboard() {
           data.strokes.forEach((stroke) => sendStroke(stroke));
           data.elements.forEach((element) => sendElement(element));
           showToastMessage(
-            `Imported ${data.strokes.length} strokes and ${data.elements.length} elements.`,
+            `Imported ${data.metadata.title} with ${data.strokes.length} strokes and ${data.elements.length} elements.`,
           );
         } else {
           showToastMessage("Invalid file format.");
@@ -596,7 +597,7 @@ export function Whiteboard() {
 
           <div className="min-w-0">
             <h1 className="hidden font-semibold text-gray-900 sm:block">
-              Whiteboard
+              {roomState.metadata.title}
             </h1>
             <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
               <span className="max-w-[110px] truncate rounded bg-gray-100 px-2 py-0.5 font-mono sm:max-w-none">
@@ -926,6 +927,11 @@ export function Whiteboard() {
                   </p>
                 </div>
               </div>
+
+              <p className="mt-3 text-xs text-gray-500">
+                Revision {roomState.metadata.revision} updated{" "}
+                {new Date(roomState.metadata.updatedAt).toLocaleTimeString()}
+              </p>
 
               <div className="mt-4 rounded-xl border border-dashed border-gray-200 bg-gray-50 px-3 py-3">
                 <p className="text-sm font-medium text-gray-700">

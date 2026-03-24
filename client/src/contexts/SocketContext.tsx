@@ -125,6 +125,17 @@ function applyElementUpdates(
   } as WhiteboardElement);
 }
 
+function bumpMetadata<T extends RoomState>(roomState: T): T {
+  return {
+    ...roomState,
+    metadata: {
+      ...roomState.metadata,
+      updatedAt: new Date().toISOString(),
+      revision: roomState.metadata.revision + 1,
+    },
+  };
+}
+
 function mergeUsers(users: User[], nextUser: User): User[] {
   const existingIndex = users.findIndex(
     (user) => user.id === nextUser.id || user.clientId === nextUser.clientId,
@@ -282,7 +293,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       }
 
       return {
-        ...prev,
+        ...bumpMetadata(prev),
         strokes: [...prev.strokes, stroke],
       };
     });
@@ -293,7 +304,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     setRoomState((prev) => {
       if (!prev) return prev;
       return {
-        ...prev,
+        ...bumpMetadata(prev),
         strokes: prev.strokes.filter((stroke) => stroke.id !== strokeId),
       };
     });
@@ -313,7 +324,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       if (existingIndex === -1) {
         return {
-          ...prev,
+          ...bumpMetadata(prev),
           elements: [...(prev.elements || []), normalizedElement],
         };
       }
@@ -327,7 +338,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       nextElements[existingIndex] = normalizedElement;
 
       return {
-        ...prev,
+        ...bumpMetadata(prev),
         elements: nextElements,
       };
     });
@@ -356,7 +367,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       if (existingIndex === -1) {
         return {
-          ...prev,
+          ...bumpMetadata(prev),
           elements: [...(prev.elements || []), normalizedElement],
         };
       }
@@ -370,7 +381,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       const nextElements = [...(prev.elements || [])];
       nextElements[existingIndex] = normalizedElement;
       return {
-        ...prev,
+        ...bumpMetadata(prev),
         elements: nextElements,
       };
     });
@@ -644,7 +655,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setRoomState((prev) => {
         if (!prev) return prev;
         return {
-          ...prev,
+          ...bumpMetadata(prev),
           strokes: [],
           elements: [],
         };
@@ -676,7 +687,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         }
 
         return {
-          ...prev,
+          ...bumpMetadata(prev),
           elements: (prev.elements || []).map((element) =>
             element.id === data.elementId
               ? nextElement
@@ -702,7 +713,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setRoomState((prev) => {
         if (!prev) return prev;
         return {
-          ...prev,
+          ...bumpMetadata(prev),
           strokes: payload.strokes,
           elements: normalizeElements(payload.elements),
         };
@@ -842,7 +853,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     setRoomState((prev) => {
       if (!prev) return prev;
       return {
-        ...prev,
+        ...bumpMetadata(prev),
         strokes: [],
         elements: [],
       };

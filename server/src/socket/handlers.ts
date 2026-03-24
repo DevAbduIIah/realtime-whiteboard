@@ -42,12 +42,26 @@ function getElementVersion(element: Pick<WhiteboardElement, 'version'>): number 
   return Math.max(1, element.version ?? 1);
 }
 
+function touchRoomMetadata(roomState: ExtendedRoomState): void {
+  const now = new Date().toISOString();
+  roomState.metadata = {
+    ...roomState.metadata,
+    updatedAt: now,
+    revision: roomState.metadata.revision + 1,
+  };
+}
+
 function saveRoomToStorage(roomId: string, roomState: ExtendedRoomState): void {
   if (roomState.saveTimeout) {
     clearTimeout(roomState.saveTimeout);
   }
   roomState.saveTimeout = setTimeout(() => {
-    updateBoardContent(roomId, roomState.strokes, roomState.elements);
+    updateBoardContent(
+      roomId,
+      roomState.strokes,
+      roomState.elements,
+      roomState.metadata,
+    );
     roomState.saveTimeout = null;
     console.log(`Saved board: ${roomId}`);
   }, SAVE_DELAY);
@@ -59,11 +73,12 @@ function getOrCreateRoom(roomId: string): ExtendedRoomState {
     const board = getOrCreateBoard(roomId);
 
     rooms.set(roomId, {
-      strokes: board.strokes || [],
-      elements: normalizeElements(board.elements || []),
+      metadata: board.metadata,
+      strokes: board.content.strokes || [],
+      elements: normalizeElements(board.content.elements || []),
       users: [],
-      strokeIds: new Set((board.strokes || []).map(s => s.id)),
-      elementIds: new Set((board.elements || []).map(e => e.id)),
+      strokeIds: new Set((board.content.strokes || []).map(s => s.id)),
+      elementIds: new Set((board.content.elements || []).map(e => e.id)),
       lastActivity: Date.now(),
       saveTimeout: null,
     });
@@ -82,7 +97,7 @@ setInterval(() => {
       if (room.saveTimeout) {
         clearTimeout(room.saveTimeout);
       }
-      updateBoardContent(roomId, room.strokes, room.elements);
+      updateBoardContent(roomId, room.strokes, room.elements, room.metadata);
       rooms.delete(roomId);
       console.log(`Cleaned up and saved inactive room: ${roomId}`);
     }
@@ -134,6 +149,7 @@ export function setupSocketHandlers(io: TypedServer): void {
       socket.emit('room:joined', {
         user,
         roomState: {
+          metadata: roomState.metadata,
           strokes: roomState.strokes,
           elements: roomState.elements,
           users: roomState.users,
@@ -171,6 +187,7 @@ export function setupSocketHandlers(io: TypedServer): void {
       roomState.strokeIds.add(stroke.id);
       roomState.strokes.push(stroke);
       roomState.lastActivity = Date.now();
+      touchRoomMetadata(roomState);
 
       // Persist to storage
       saveRoomToStorage(user.roomId, roomState);
@@ -188,6 +205,7 @@ export function setupSocketHandlers(io: TypedServer): void {
       roomState.strokes = roomState.strokes.filter((stroke) => stroke.id !== strokeId);
       roomState.strokeIds.delete(strokeId);
       roomState.lastActivity = Date.now();
+      touchRoomMetadata(roomState);
 
       saveRoomToStorage(user.roomId, roomState);
 
@@ -205,6 +223,7 @@ export function setupSocketHandlers(io: TypedServer): void {
         roomState.strokeIds.clear();
         roomState.elementIds.clear();
         roomState.lastActivity = Date.now();
+        touchRoomMetadata(roomState);
 
         // Persist to storage
         saveRoomToStorage(user.roomId, roomState);
@@ -230,6 +249,7 @@ export function setupSocketHandlers(io: TypedServer): void {
       roomState.elementIds.add(normalizedElement.id);
       roomState.elements.push(normalizedElement);
       roomState.lastActivity = Date.now();
+      touchRoomMetadata(roomState);
 
       // Persist to storage
       saveRoomToStorage(user.roomId, roomState);
@@ -262,6 +282,7 @@ export function setupSocketHandlers(io: TypedServer): void {
           ...nextElement,
         } as WhiteboardElement;
         roomState.lastActivity = Date.now();
+        touchRoomMetadata(roomState);
         appliedUpdates = nextElement;
 
         // Persist to storage
@@ -286,6 +307,7 @@ export function setupSocketHandlers(io: TypedServer): void {
       roomState.elements = roomState.elements.filter(e => e.id !== elementId);
       roomState.elementIds.delete(elementId);
       roomState.lastActivity = Date.now();
+      touchRoomMetadata(roomState);
 
       // Persist to storage
       saveRoomToStorage(user.roomId, roomState);
@@ -305,6 +327,7 @@ export function setupSocketHandlers(io: TypedServer): void {
       roomState.strokeIds = new Set(strokes.map((stroke) => stroke.id));
       roomState.elementIds = new Set(elements.map((element) => element.id));
       roomState.lastActivity = Date.now();
+      touchRoomMetadata(roomState);
 
       saveRoomToStorage(user.roomId, roomState);
 

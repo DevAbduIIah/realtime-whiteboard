@@ -51,18 +51,18 @@ app.get('/api/boards/:id', (req, res) => {
 });
 
 app.post('/api/boards', (req, res) => {
-  const { name } = req.body;
-  if (!name || typeof name !== 'string') {
-    res.status(400).json({ error: 'Board name is required' });
+  const title = req.body.title || req.body.name;
+  if (!title || typeof title !== 'string') {
+    res.status(400).json({ error: 'Board title is required' });
     return;
   }
-  const board = createBoard(name);
+  const board = createBoard(title);
   res.status(201).json(board);
 });
 
 app.put('/api/boards/:id', (req, res) => {
-  const { name, accessLevel } = req.body;
-  const board = updateBoard(req.params.id, { name, accessLevel });
+  const { title, name, accessLevel } = req.body;
+  const board = updateBoard(req.params.id, { title, name, accessLevel });
   if (!board) {
     res.status(404).json({ error: 'Board not found' });
     return;
@@ -80,8 +80,8 @@ app.delete('/api/boards/:id', (req, res) => {
 });
 
 app.post('/api/boards/:id/duplicate', (req, res) => {
-  const { name } = req.body;
-  const board = duplicateBoard(req.params.id, name);
+  const title = req.body.title || req.body.name;
+  const board = duplicateBoard(req.params.id, title);
   if (!board) {
     res.status(404).json({ error: 'Board not found' });
     return;
