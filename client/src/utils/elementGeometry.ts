@@ -409,6 +409,7 @@ export function cloneElementWithOffset(
   return {
     ...translated,
     id,
+    version: 1,
     userId,
   } as WhiteboardElement;
 }

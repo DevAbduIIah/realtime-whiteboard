@@ -93,6 +93,38 @@ function cloneElement<T extends WhiteboardElement>(element: T): T {
   return { ...element };
 }
 
+function normalizeElement<T extends WhiteboardElement>(element: T): T {
+  return {
+    ...element,
+    version: Math.max(1, element.version ?? 1),
+  };
+}
+
+function normalizeElements(elements: WhiteboardElement[]): WhiteboardElement[] {
+  return elements.map((element) => normalizeElement(element));
+}
+
+function getElementVersion(element: Pick<WhiteboardElement, "version">): number {
+  return Math.max(1, element.version ?? 1);
+}
+
+function shouldApplyElementUpdate(
+  currentElement: WhiteboardElement,
+  nextElement: WhiteboardElement,
+): boolean {
+  return getElementVersion(nextElement) >= getElementVersion(currentElement);
+}
+
+function applyElementUpdates(
+  currentElement: WhiteboardElement,
+  updates: Partial<WhiteboardElement>,
+): WhiteboardElement {
+  return normalizeElement({
+    ...currentElement,
+    ...updates,
+  } as WhiteboardElement);
+}
+
 function mergeUsers(users: User[], nextUser: User): User[] {
   const existingIndex = users.findIndex(
     (user) => user.id === nextUser.id || user.clientId === nextUser.clientId,
@@ -134,6 +166,9 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const awaitingRoomRejoinRef = useRef(false);
   const processedStrokesRef = useRef<Set<string>>(new Set());
   const processedElementsRef = useRef<Set<string>>(new Set());
+  const pendingCursorUpdatesRef = useRef<Map<string, CursorPosition>>(new Map());
+  const pendingCursorRemovalsRef = useRef<Set<string>>(new Set());
+  const cursorFrameRef = useRef<number | null>(null);
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
   const historyCaptureRef = useRef<HistoryCapture>({
@@ -158,6 +193,49 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     }, 500);
 
     return () => clearInterval(interval);
+  }, []);
+
+  const flushPendingCursorUpdates = useCallback(() => {
+    cursorFrameRef.current = null;
+
+    if (
+      pendingCursorUpdatesRef.current.size === 0 &&
+      pendingCursorRemovalsRef.current.size === 0
+    ) {
+      return;
+    }
+
+    setCursors((prev) => {
+      const next = new Map(prev);
+
+      pendingCursorRemovalsRef.current.forEach((userId) => {
+        next.delete(userId);
+      });
+
+      pendingCursorUpdatesRef.current.forEach((cursor, userId) => {
+        next.set(userId, cursor);
+      });
+
+      pendingCursorUpdatesRef.current.clear();
+      pendingCursorRemovalsRef.current.clear();
+      return next;
+    });
+  }, []);
+
+  const scheduleCursorFlush = useCallback(() => {
+    if (cursorFrameRef.current !== null) {
+      return;
+    }
+
+    cursorFrameRef.current = window.requestAnimationFrame(flushPendingCursorUpdates);
+  }, [flushPendingCursorUpdates]);
+
+  useEffect(() => {
+    return () => {
+      if (cursorFrameRef.current !== null) {
+        window.cancelAnimationFrame(cursorFrameRef.current);
+      }
+    };
   }, []);
 
   const syncHistoryFlags = useCallback(() => {
@@ -222,18 +300,35 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const addElementLocal = useCallback((element: WhiteboardElement) => {
-    processedElementsRef.current.add(element.id);
+    const normalizedElement = normalizeElement(element);
+    processedElementsRef.current.add(normalizedElement.id);
     setRoomState((prev) => {
-      if (
-        !prev ||
-        (prev.elements || []).some((existingElement) => existingElement.id === element.id)
-      ) {
+      if (!prev) {
         return prev;
       }
 
+      const existingIndex = (prev.elements || []).findIndex(
+        (existingElement) => existingElement.id === normalizedElement.id,
+      );
+
+      if (existingIndex === -1) {
+        return {
+          ...prev,
+          elements: [...(prev.elements || []), normalizedElement],
+        };
+      }
+
+      const existingElement = prev.elements[existingIndex];
+      if (!shouldApplyElementUpdate(existingElement, normalizedElement)) {
+        return prev;
+      }
+
+      const nextElements = [...(prev.elements || [])];
+      nextElements[existingIndex] = normalizedElement;
+
       return {
         ...prev,
-        elements: [...(prev.elements || []), element],
+        elements: nextElements,
       };
     });
   }, []);
@@ -250,23 +345,30 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setElementLocal = useCallback((element: WhiteboardElement) => {
-    processedElementsRef.current.add(element.id);
+    const normalizedElement = normalizeElement(element);
+    processedElementsRef.current.add(normalizedElement.id);
     setRoomState((prev) => {
       if (!prev) return prev;
 
       const existingIndex = (prev.elements || []).findIndex(
-        (existingElement) => existingElement.id === element.id,
+        (existingElement) => existingElement.id === normalizedElement.id,
       );
 
       if (existingIndex === -1) {
         return {
           ...prev,
-          elements: [...(prev.elements || []), element],
+          elements: [...(prev.elements || []), normalizedElement],
         };
       }
 
+      if (
+        !shouldApplyElementUpdate(prev.elements[existingIndex], normalizedElement)
+      ) {
+        return prev;
+      }
+
       const nextElements = [...(prev.elements || [])];
-      nextElements[existingIndex] = element;
+      nextElements[existingIndex] = normalizedElement;
       return {
         ...prev,
         elements: nextElements,
@@ -304,7 +406,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   const updateCurrentUserPresenceLocal = useCallback((status: PresenceStatus) => {
     const activeUser = currentUserRef.current;
-    if (!activeUser) {
+    if (!activeUser || activeUser.status === status) {
       return;
     }
 
@@ -445,6 +547,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     function onDisconnect() {
       setIsConnected(false);
       setCursors(new Map());
+      pendingCursorUpdatesRef.current.clear();
+      pendingCursorRemovalsRef.current.clear();
 
       if (lastRoomInfoRef.current) {
         awaitingRoomRejoinRef.current = true;
@@ -471,7 +575,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     function onRoomJoined(data: { user: User; roomState: RoomState }) {
       const normalizedRoomState = {
         ...data.roomState,
-        elements: data.roomState.elements || [],
+        elements: normalizeElements(data.roomState.elements || []),
       };
 
       const didRejoin = awaitingRoomRejoinRef.current;
@@ -501,6 +605,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       processedElementsRef.current = new Set(
         normalizedRoomState.elements.map((element) => element.id),
       );
+      pendingCursorUpdatesRef.current.clear();
+      pendingCursorRemovalsRef.current.clear();
 
       resetHistory();
     }
@@ -557,11 +663,23 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setRoomState((prev) => {
         if (!prev) return prev;
 
+        const existingElement = (prev.elements || []).find(
+          (element) => element.id === data.elementId,
+        );
+        if (!existingElement) {
+          return prev;
+        }
+
+        const nextElement = applyElementUpdates(existingElement, data.updates);
+        if (!shouldApplyElementUpdate(existingElement, nextElement)) {
+          return prev;
+        }
+
         return {
           ...prev,
           elements: (prev.elements || []).map((element) =>
             element.id === data.elementId
-              ? ({ ...element, ...data.updates } as WhiteboardElement)
+              ? nextElement
               : element,
           ),
         };
@@ -586,25 +704,21 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         return {
           ...prev,
           strokes: payload.strokes,
-          elements: payload.elements,
+          elements: normalizeElements(payload.elements),
         };
       });
     }
 
     function onCursorUpdate(cursor: CursorPosition) {
-      setCursors((prev) => {
-        const next = new Map(prev);
-        next.set(cursor.userId, cursor);
-        return next;
-      });
+      pendingCursorRemovalsRef.current.delete(cursor.userId);
+      pendingCursorUpdatesRef.current.set(cursor.userId, cursor);
+      scheduleCursorFlush();
     }
 
     function onCursorRemove(userId: string) {
-      setCursors((prev) => {
-        const next = new Map(prev);
-        next.delete(userId);
-        return next;
-      });
+      pendingCursorUpdatesRef.current.delete(userId);
+      pendingCursorRemovalsRef.current.add(userId);
+      scheduleCursorFlush();
     }
 
     function onReactionAdd(reaction: BoardReaction) {
@@ -659,6 +773,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     deleteStrokeLocal,
     removeUserLocal,
     resetHistory,
+    scheduleCursorFlush,
     setElementLocal,
     setUserLocal,
     socket,
@@ -677,6 +792,12 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     lastRoomInfoRef.current = null;
     processedStrokesRef.current.clear();
     processedElementsRef.current.clear();
+    pendingCursorUpdatesRef.current.clear();
+    pendingCursorRemovalsRef.current.clear();
+    if (cursorFrameRef.current !== null) {
+      window.cancelAnimationFrame(cursorFrameRef.current);
+      cursorFrameRef.current = null;
+    }
     awaitingRoomRejoinRef.current = false;
     setReconnectAttempt(0);
     setLastRejoinedAt(null);
@@ -771,7 +892,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   const sendElement = useCallback(
     (element: WhiteboardElement, options?: MutationOptions) => {
-      const nextElement = cloneElement(element);
+      const nextElement = normalizeElement(cloneElement(element));
       addElementLocal(nextElement);
       emitElementAdd(nextElement);
 
@@ -795,10 +916,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       const capture = historyCaptureRef.current;
       const baseElement = capture.after.get(elementId) ?? currentElement;
-      const nextElement = {
+      const nextElement = normalizeElement({
         ...baseElement,
         ...updates,
-      } as WhiteboardElement;
+        version: Math.max(
+          getElementVersion(baseElement),
+          getElementVersion(currentElement),
+        ) + 1,
+      } as WhiteboardElement);
 
       if (capture.active) {
         if (!capture.before.has(elementId)) {

@@ -639,6 +639,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   const textInputRef = useRef<HTMLTextAreaElement>(null);
   const selectionInteractionRef = useRef<SelectionInteraction | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drawFrameRef = useRef<number | null>(null);
   const pendingSyncElementsRef = useRef<WhiteboardElement[] | null>(null);
   const liveElementOverridesRef = useRef<Record<string, WhiteboardElement>>({});
 
@@ -698,7 +699,6 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     handleMouseLeave: originalHandleMouseLeave,
   } = useCanvasDrawing({
     onStrokeComplete: handleStrokeCompleteInternal,
-    strokes,
     drawingState,
     userId,
   });
@@ -1365,7 +1365,21 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   );
 
   useEffect(() => {
-    drawElements();
+    if (drawFrameRef.current !== null) {
+      cancelAnimationFrame(drawFrameRef.current);
+    }
+
+    drawFrameRef.current = requestAnimationFrame(() => {
+      drawFrameRef.current = null;
+      drawElements();
+    });
+
+    return () => {
+      if (drawFrameRef.current !== null) {
+        cancelAnimationFrame(drawFrameRef.current);
+        drawFrameRef.current = null;
+      }
+    };
   }, [drawElements]);
 
   useEffect(() => {
@@ -1543,6 +1557,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       ];
       const sticky: StickyElement = {
         id: generateId(),
+        version: 1,
         type: "sticky",
         x: point.x,
         y: point.y,
@@ -1669,6 +1684,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
         drawingState.tool === "line" || drawingState.tool === "arrow"
           ? {
               id: generateId(),
+              version: 1,
               type: drawingState.tool,
               x: shapeStart.x,
               y: shapeStart.y,
@@ -1680,6 +1696,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
             }
           : {
               id: generateId(),
+              version: 1,
               type: drawingState.tool as "rectangle" | "circle",
               x: Math.min(shapeStart.x, point.x),
               y: Math.min(shapeStart.y, point.y),
@@ -1765,6 +1782,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     if (textValue.trim() && textInput.visible) {
       const text: TextElement = {
         id: generateId(),
+        version: 1,
         type: "text",
         x: textInput.x,
         y: textInput.y,

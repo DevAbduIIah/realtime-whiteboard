@@ -21,6 +21,7 @@ export interface DrawStroke {
 
 export interface TextElement {
   id: string;
+  version: number;
   type: 'text';
   x: number;
   y: number;
@@ -32,6 +33,7 @@ export interface TextElement {
 
 export interface StickyElement {
   id: string;
+  version: number;
   type: 'sticky';
   x: number;
   y: number;
@@ -44,6 +46,7 @@ export interface StickyElement {
 
 export interface ShapeElement {
   id: string;
+  version: number;
   type: 'rectangle' | 'circle' | 'line' | 'arrow';
   x: number;
   y: number;

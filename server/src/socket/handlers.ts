@@ -27,6 +27,21 @@ const ROOM_CLEANUP_DELAY = 5 * 60 * 1000;
 // Debounce save delay
 const SAVE_DELAY = 2000;
 
+function normalizeElement(element: WhiteboardElement): WhiteboardElement {
+  return {
+    ...element,
+    version: Math.max(1, element.version ?? 1),
+  };
+}
+
+function normalizeElements(elements: WhiteboardElement[]): WhiteboardElement[] {
+  return elements.map((element) => normalizeElement(element));
+}
+
+function getElementVersion(element: Pick<WhiteboardElement, 'version'>): number {
+  return Math.max(1, element.version ?? 1);
+}
+
 function saveRoomToStorage(roomId: string, roomState: ExtendedRoomState): void {
   if (roomState.saveTimeout) {
     clearTimeout(roomState.saveTimeout);
@@ -45,7 +60,7 @@ function getOrCreateRoom(roomId: string): ExtendedRoomState {
 
     rooms.set(roomId, {
       strokes: board.strokes || [],
-      elements: board.elements || [],
+      elements: normalizeElements(board.elements || []),
       users: [],
       strokeIds: new Set((board.strokes || []).map(s => s.id)),
       elementIds: new Set((board.elements || []).map(e => e.id)),
@@ -205,19 +220,21 @@ export function setupSocketHandlers(io: TypedServer): void {
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
 
+      const normalizedElement = normalizeElement(element);
+
       // Prevent duplicate elements
-      if (roomState.elementIds.has(element.id)) {
+      if (roomState.elementIds.has(normalizedElement.id)) {
         return;
       }
 
-      roomState.elementIds.add(element.id);
-      roomState.elements.push(element);
+      roomState.elementIds.add(normalizedElement.id);
+      roomState.elements.push(normalizedElement);
       roomState.lastActivity = Date.now();
 
       // Persist to storage
       saveRoomToStorage(user.roomId, roomState);
 
-      socket.to(user.roomId).emit('element:add', element);
+      socket.to(user.roomId).emit('element:add', normalizedElement);
     });
 
     socket.on('element:update', ({ elementId, updates }) => {
@@ -228,18 +245,35 @@ export function setupSocketHandlers(io: TypedServer): void {
       if (!roomState) return;
 
       const elementIndex = roomState.elements.findIndex(e => e.id === elementId);
+      let appliedUpdates: Partial<WhiteboardElement> | null = null;
       if (elementIndex !== -1) {
+        const currentElement = roomState.elements[elementIndex];
+        const nextElement = normalizeElement({
+          ...currentElement,
+          ...updates,
+        } as WhiteboardElement);
+
+        if (getElementVersion(nextElement) < getElementVersion(currentElement)) {
+          return;
+        }
+
         roomState.elements[elementIndex] = {
           ...roomState.elements[elementIndex],
-          ...updates,
+          ...nextElement,
         } as WhiteboardElement;
         roomState.lastActivity = Date.now();
+        appliedUpdates = nextElement;
 
         // Persist to storage
         saveRoomToStorage(user.roomId, roomState);
       }
 
-      socket.to(user.roomId).emit('element:update', { elementId, updates });
+      if (appliedUpdates) {
+        socket.to(user.roomId).emit('element:update', {
+          elementId,
+          updates: appliedUpdates,
+        });
+      }
     });
 
     socket.on('element:delete', ({ elementId }) => {
@@ -267,14 +301,17 @@ export function setupSocketHandlers(io: TypedServer): void {
       if (!roomState) return;
 
       roomState.strokes = strokes;
-      roomState.elements = elements;
+      roomState.elements = normalizeElements(elements);
       roomState.strokeIds = new Set(strokes.map((stroke) => stroke.id));
       roomState.elementIds = new Set(elements.map((element) => element.id));
       roomState.lastActivity = Date.now();
 
       saveRoomToStorage(user.roomId, roomState);
 
-      socket.to(user.roomId).emit('board:replace', { strokes, elements });
+      socket.to(user.roomId).emit('board:replace', {
+        strokes,
+        elements: roomState.elements,
+      });
     });
 
     socket.on('cursor:move', ({ x, y, status }) => {

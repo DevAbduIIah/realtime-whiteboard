@@ -1,23 +1,20 @@
-import { useRef, useCallback, useEffect, MouseEvent } from 'react';
+import { useRef, useCallback, MouseEvent } from 'react';
 import type { Point, DrawStroke, DrawingState } from '../types';
 
 interface UseCanvasDrawingOptions {
   onStrokeComplete: (stroke: DrawStroke) => void;
-  strokes: DrawStroke[];
   drawingState: DrawingState;
   userId: string;
 }
 
 export function useCanvasDrawing({
   onStrokeComplete,
-  strokes,
   drawingState,
   userId,
 }: UseCanvasDrawingOptions) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isDrawingRef = useRef(false);
   const currentPointsRef = useRef<Point[]>([]);
-  const lastPointRef = useRef<Point | null>(null);
 
   const getCanvasPoint = useCallback(
     (e: MouseEvent<HTMLCanvasElement>): Point => {
@@ -80,25 +77,6 @@ export function useCanvasDrawing({
     []
   );
 
-  const redrawCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    strokes.forEach((stroke) => {
-      drawStroke(ctx, stroke);
-    });
-  }, [strokes, drawStroke]);
-
-  useEffect(() => {
-    redrawCanvas();
-  }, [redrawCanvas]);
-
   const handleMouseDown = useCallback(
     (e: MouseEvent<HTMLCanvasElement>) => {
       if (e.button !== 0) return;
@@ -106,7 +84,6 @@ export function useCanvasDrawing({
       isDrawingRef.current = true;
       const point = getCanvasPoint(e);
       currentPointsRef.current = [point];
-      lastPointRef.current = point;
     },
     [getCanvasPoint]
   );
@@ -138,7 +115,6 @@ export function useCanvasDrawing({
       };
 
       drawStroke(ctx, currentStroke, true);
-      lastPointRef.current = point;
     },
     [getCanvasPoint, drawingState, userId, drawStroke]
   );
@@ -167,7 +143,6 @@ export function useCanvasDrawing({
     }
 
     currentPointsRef.current = [];
-    lastPointRef.current = null;
   }, [drawingState, userId, onStrokeComplete]);
 
   const handleMouseLeave = useCallback(() => {
@@ -182,7 +157,6 @@ export function useCanvasDrawing({
     handleMouseMove,
     handleMouseUp,
     handleMouseLeave,
-    redrawCanvas,
   };
 }
 
