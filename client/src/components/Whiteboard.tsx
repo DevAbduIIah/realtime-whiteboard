@@ -577,7 +577,7 @@ export function Whiteboard() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-gradient-to-br from-gray-50 via-white to-slate-100">
-      <header className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white/85 px-3 py-3 backdrop-blur-sm md:px-4">
+      <header className="relative z-30 flex flex-shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white/85 px-3 py-3 backdrop-blur-sm md:px-4">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 shadow-sm">
             <svg
@@ -790,7 +790,7 @@ export function Whiteboard() {
         </div>
       </header>
 
-      <main className="flex flex-1 flex-col gap-4 p-4 min-h-0">
+      <main className="relative z-0 flex min-h-0 flex-1 flex-col gap-4 p-4">
         <div className="flex flex-shrink-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex justify-center xl:flex-1 xl:justify-start">
             <Toolbar
