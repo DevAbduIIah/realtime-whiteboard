@@ -135,6 +135,7 @@ const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 1.15;
 const VIEWPORT_PADDING = 48;
+const EMPTY_BOARD_ZOOM_BOOST = 1.25;
 
 function clampZoom(zoom: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
@@ -253,6 +254,24 @@ function getFitView(
   };
 }
 
+function getComfortableBlankView(
+  containerWidth: number,
+  containerHeight: number,
+): ViewState {
+  const fitView = getFitView(containerWidth, containerHeight, {
+    left: 0,
+    top: 0,
+    right: CANVAS_WIDTH,
+    bottom: CANVAS_HEIGHT,
+  });
+
+  return getCenteredView(
+    containerWidth,
+    containerHeight,
+    clampZoom(Math.min(1, fitView.zoom * EMPTY_BOARD_ZOOM_BOOST)),
+  );
+}
+
 function worldToScreen(point: Point, viewState: ViewState): Point {
   return {
     x: point.x * viewState.zoom + viewState.panX,
@@ -337,8 +356,8 @@ function drawStrokePath(
   ctx.lineWidth = stroke.size;
 
   if (stroke.tool === "eraser") {
-    ctx.globalCompositeOperation = "source-over";
-    ctx.strokeStyle = "#ffffff";
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.strokeStyle = "#000000";
   } else {
     ctx.globalCompositeOperation = "source-over";
     ctx.strokeStyle = stroke.color;
@@ -652,11 +671,13 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   const [clipboardElements, setClipboardElements] = useState<
     WhiteboardElement[]
   >([]);
+  const [previewStroke, setPreviewStroke] = useState<DrawStroke | null>(null);
   const [liveElementOverrides, setLiveElementOverrides] = useState<
     Record<string, WhiteboardElement>
   >({});
 
   const textInputRef = useRef<HTMLTextAreaElement>(null);
+  const contentLayerCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const selectionInteractionRef = useRef<SelectionInteraction | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const drawFrameRef = useRef<number | null>(null);
@@ -713,12 +734,12 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
   const {
     canvasRef,
-    handleMouseDown: originalHandleMouseDown,
-    handleMouseMove,
-    handleMouseUp: originalHandleMouseUp,
-    handleMouseLeave: originalHandleMouseLeave,
+    handlePointerDown: originalHandlePointerDown,
+    handlePointerMove,
+    handlePointerUp: originalHandlePointerUp,
   } = useCanvasDrawing({
     onStrokeComplete: handleStrokeCompleteInternal,
+    onStrokePreview: setPreviewStroke,
     drawingState,
     userId,
   });
@@ -766,9 +787,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     () => getBoardContentBounds(strokes, elements),
     [elements, strokes],
   );
+  const isBoardEmpty = strokes.length === 0 && elements.length === 0;
 
   const getCanvasPoint = useCallback(
-    (e: React.MouseEvent): Point => {
+    (event: { clientX: number; clientY: number }): Point => {
       const canvas = canvasRef.current;
       if (!canvas) return { x: 0, y: 0 };
 
@@ -777,8 +799,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       const scaleY = CANVAS_HEIGHT / rect.height;
 
       return {
-        x: (e.clientX - rect.left) * scaleX,
-        y: (e.clientY - rect.top) * scaleY,
+        x: (event.clientX - rect.left) * scaleX,
+        y: (event.clientY - rect.top) * scaleY,
       };
     },
     [canvasRef],
@@ -1029,11 +1051,16 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       if (!hasInitializedViewportRef.current) {
         hasInitializedViewportRef.current = true;
         setViewState(
-          getFitView(
-            container.clientWidth,
-            container.clientHeight,
-            contentBounds,
-          ),
+          isBoardEmpty
+            ? getComfortableBlankView(
+                container.clientWidth,
+                container.clientHeight,
+              )
+            : getFitView(
+                container.clientWidth,
+                container.clientHeight,
+                contentBounds,
+              ),
         );
         return;
       }
@@ -1063,7 +1090,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     observer.observe(container);
 
     return () => observer.disconnect();
-  }, [contentBounds]);
+  }, [contentBounds, isBoardEmpty]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1227,7 +1254,30 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       }
 
       drawBoardPresentation(ctx, targetCanvas.width, targetCanvas.height, metadata);
-      strokes.forEach((stroke) => drawStrokePath(ctx, stroke));
+
+      const layerCanvas =
+        contentLayerCanvasRef.current ??
+        targetCanvas.ownerDocument?.createElement("canvas") ??
+        null;
+      let layerContext: CanvasRenderingContext2D | null = null;
+      if (!layerCanvas) {
+        strokes.forEach((stroke) => drawStrokePath(ctx, stroke));
+      } else {
+        layerCanvas.width = targetCanvas.width;
+        layerCanvas.height = targetCanvas.height;
+        layerContext = layerCanvas.getContext("2d");
+
+        if (!layerContext) {
+          strokes.forEach((stroke) => drawStrokePath(ctx, stroke));
+        } else {
+          const activeLayerContext = layerContext;
+          activeLayerContext.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
+          strokes.forEach((stroke) => drawStrokePath(activeLayerContext, stroke));
+          if (previewStroke) {
+            drawStrokePath(activeLayerContext, previewStroke);
+          }
+        }
+      }
 
       const allElements =
         options.includePreviewShape && previewShape
@@ -1235,31 +1285,33 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           : resolvedElements;
 
       allElements.forEach((element) => {
-        ctx.save();
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
+        const targetContext = layerContext ?? ctx;
+
+        targetContext.save();
+        targetContext.lineCap = "round";
+        targetContext.lineJoin = "round";
 
         switch (element.type) {
           case "rectangle": {
             const bounds = getElementBounds(element);
-            ctx.strokeStyle = element.color;
-            ctx.lineWidth = element.strokeWidth;
-            ctx.beginPath();
-            ctx.rect(bounds.left, bounds.top, bounds.width, bounds.height);
+            targetContext.strokeStyle = element.color;
+            targetContext.lineWidth = element.strokeWidth;
+            targetContext.beginPath();
+            targetContext.rect(bounds.left, bounds.top, bounds.width, bounds.height);
             if (element.fill) {
-              ctx.fillStyle = element.fill;
-              ctx.fill();
+              targetContext.fillStyle = element.fill;
+              targetContext.fill();
             }
-            ctx.stroke();
+            targetContext.stroke();
             break;
           }
 
           case "circle": {
             const bounds = getElementBounds(element);
-            ctx.strokeStyle = element.color;
-            ctx.lineWidth = element.strokeWidth;
-            ctx.beginPath();
-            ctx.ellipse(
+            targetContext.strokeStyle = element.color;
+            targetContext.lineWidth = element.strokeWidth;
+            targetContext.beginPath();
+            targetContext.ellipse(
               bounds.left + bounds.width / 2,
               bounds.top + bounds.height / 2,
               bounds.width / 2,
@@ -1269,20 +1321,20 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
               Math.PI * 2,
             );
             if (element.fill) {
-              ctx.fillStyle = element.fill;
-              ctx.fill();
+              targetContext.fillStyle = element.fill;
+              targetContext.fill();
             }
-            ctx.stroke();
+            targetContext.stroke();
             break;
           }
 
           case "line": {
-            ctx.strokeStyle = element.color;
-            ctx.lineWidth = element.strokeWidth;
-            ctx.beginPath();
-            ctx.moveTo(element.x, element.y);
-            ctx.lineTo(element.x + element.width, element.y + element.height);
-            ctx.stroke();
+            targetContext.strokeStyle = element.color;
+            targetContext.lineWidth = element.strokeWidth;
+            targetContext.beginPath();
+            targetContext.moveTo(element.x, element.y);
+            targetContext.lineTo(element.x + element.width, element.y + element.height);
+            targetContext.stroke();
             break;
           }
 
@@ -1292,25 +1344,25 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
             const angle = Math.atan2(element.height, element.width);
             const headLength = 15;
 
-            ctx.strokeStyle = element.color;
-            ctx.lineWidth = element.strokeWidth;
-            ctx.beginPath();
-            ctx.moveTo(element.x, element.y);
-            ctx.lineTo(endX, endY);
-            ctx.stroke();
+            targetContext.strokeStyle = element.color;
+            targetContext.lineWidth = element.strokeWidth;
+            targetContext.beginPath();
+            targetContext.moveTo(element.x, element.y);
+            targetContext.lineTo(endX, endY);
+            targetContext.stroke();
 
-            ctx.beginPath();
-            ctx.moveTo(endX, endY);
-            ctx.lineTo(
+            targetContext.beginPath();
+            targetContext.moveTo(endX, endY);
+            targetContext.lineTo(
               endX - headLength * Math.cos(angle - Math.PI / 6),
               endY - headLength * Math.sin(angle - Math.PI / 6),
             );
-            ctx.moveTo(endX, endY);
-            ctx.lineTo(
+            targetContext.moveTo(endX, endY);
+            targetContext.lineTo(
               endX - headLength * Math.cos(angle + Math.PI / 6),
               endY - headLength * Math.sin(angle + Math.PI / 6),
             );
-            ctx.stroke();
+            targetContext.stroke();
             break;
           }
 
@@ -1318,10 +1370,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
             const lines = element.text.split("\n");
             const lineHeight = getLineHeight(element.fontSize);
 
-            ctx.fillStyle = element.color;
-            ctx.font = `${element.fontSize}px sans-serif`;
+            targetContext.fillStyle = element.color;
+            targetContext.font = `${element.fontSize}px sans-serif`;
             lines.forEach((line, lineIndex) => {
-              ctx.fillText(
+              targetContext.fillText(
                 line,
                 element.x,
                 element.y + element.fontSize + lineIndex * lineHeight,
@@ -1331,15 +1383,15 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           }
 
           case "sticky": {
-            ctx.fillStyle = element.color;
-            ctx.fillRect(element.x, element.y, element.width, element.height);
-            ctx.strokeStyle = "#00000022";
-            ctx.strokeRect(element.x, element.y, element.width, element.height);
-            ctx.fillStyle = "#111827";
-            ctx.font = "16px sans-serif";
+            targetContext.fillStyle = element.color;
+            targetContext.fillRect(element.x, element.y, element.width, element.height);
+            targetContext.strokeStyle = "#00000022";
+            targetContext.strokeRect(element.x, element.y, element.width, element.height);
+            targetContext.fillStyle = "#111827";
+            targetContext.font = "16px sans-serif";
             const lines = element.text.split("\n");
             lines.forEach((line, lineIndex) => {
-              ctx.fillText(
+              targetContext.fillText(
                 line,
                 element.x + 10,
                 element.y + 25 + lineIndex * 20,
@@ -1349,14 +1401,21 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           }
         }
 
-        ctx.restore();
+        targetContext.restore();
       });
+
+      if (layerCanvas) {
+        if (targetCanvas.ownerDocument) {
+          contentLayerCanvasRef.current = layerCanvas;
+        }
+        ctx.drawImage(layerCanvas, 0, 0);
+      }
 
       if (options.includeSelectionOverlay) {
         drawSelectionOverlay(ctx);
       }
     },
-    [drawSelectionOverlay, metadata, previewShape, resolvedElements, strokes],
+    [drawSelectionOverlay, metadata, previewShape, previewStroke, resolvedElements, strokes],
   );
 
   const drawElements = useCallback(() => {
@@ -1555,7 +1614,23 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     [viewState.zoom, zoomAtPoint],
   );
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const captureCanvasPointer = (
+    event: React.PointerEvent<HTMLCanvasElement>,
+  ) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+  };
+
+  const releaseCanvasPointer = (
+    event: React.PointerEvent<HTMLCanvasElement>,
+  ) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) {
       return;
     }
@@ -1582,6 +1657,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     }
 
     if (isSelectTool) {
+      captureCanvasPointer(e);
       handleSelectMouseDown(point, e.shiftKey);
       return;
     }
@@ -1623,6 +1699,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     }
 
     if (isShapeTool) {
+      captureCanvasPointer(e);
       setShapeStart(point);
       setIsDrawing(true);
       onDrawStart?.();
@@ -1630,9 +1707,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     }
 
     if (isDrawingTool) {
+      captureCanvasPointer(e);
       setIsDrawing(true);
       onDrawStart?.();
-      originalHandleMouseDown(e);
+      originalHandlePointerDown(e);
     }
   };
 
@@ -1722,7 +1800,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     [onSelectionMutationStart, queueElementSync, resolvedElements],
   );
 
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const point = getCanvasPoint(e);
 
     if (isSelectTool) {
@@ -1762,7 +1840,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
       setPreviewShape(shape);
     } else if (isDrawingTool) {
-      handleMouseMove(e);
+      handlePointerMove(e);
     }
 
     if (onMouseMove) {
@@ -1797,9 +1875,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     setMarqueeSelection(null);
   }, [clearPendingSync, flushElementSync, onSelectionMutationEnd]);
 
-  const handleMouseUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (isSelectTool) {
       finishSelectionInteraction();
+      releaseCanvasPointer(e);
       return;
     }
 
@@ -1813,22 +1892,13 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
     setIsDrawing(false);
     if (isDrawingTool) {
-      originalHandleMouseUp();
+      originalHandlePointerUp();
     }
+    releaseCanvasPointer(e);
   };
 
-  const handleMouseLeave = () => {
-    if (isSelectTool) {
-      finishSelectionInteraction();
-      return;
-    }
-
-    setIsDrawing(false);
-    setShapeStart(null);
-    setPreviewShape(null);
-    if (isDrawingTool) {
-      originalHandleMouseLeave();
-    }
+  const handlePointerCancel = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    handlePointerUp(e);
   };
 
   const handleTextSubmit = () => {
@@ -1918,10 +1988,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
             cursor: getCursor(),
             background: "transparent",
           }}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleCanvasMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseLeave}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
         />
       </div>
 

@@ -7,7 +7,7 @@ export function JoinScreen() {
   const shareLinkState = useMemo(
     () =>
       typeof window === "undefined"
-        ? { roomId: "", viewOnly: false }
+        ? { roomId: "", viewOnly: false, accessToken: "" }
         : parseShareableLink(window.location.search),
     [],
   );
@@ -18,7 +18,7 @@ export function JoinScreen() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (userName.trim() && roomId.trim()) {
-      joinRoom(roomId.trim(), userName.trim());
+      joinRoom(roomId.trim(), userName.trim(), shareLinkState.accessToken || undefined);
     }
   };
 
@@ -52,13 +52,21 @@ export function JoinScreen() {
           <p className="text-gray-500 mt-2">
             {isViewOnlyLink
               ? "Open a live board in view-only mode"
-              : "Draw together in real-time with others"}
+              : shareLinkState.accessToken
+                ? "Join a private board from an invite link"
+                : "Draw together in real-time with others"}
           </p>
         </div>
 
         {isViewOnlyLink && (
           <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             This link opens the board in read-only mode on your device. You can still join the room, watch updates, and export the board.
+          </div>
+        )}
+
+        {!isViewOnlyLink && shareLinkState.accessToken && (
+          <div className="mb-6 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+            This link includes a private-board invite token for this device.
           </div>
         )}
 

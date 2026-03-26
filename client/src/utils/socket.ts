@@ -47,7 +47,14 @@ interface ServerToClientEvents {
 }
 
 interface ClientToServerEvents {
-  'room:join': (payload: { roomId: string; userName: string; clientId: string }) => void;
+  'room:join': (payload: {
+    roomId: string;
+    userName: string;
+    clientId: string;
+    accountId: string;
+    authToken: string;
+    accessToken?: string;
+  }) => void;
   'room:leave': () => void;
   'draw:stroke': (payload: { stroke: DrawStroke }) => void;
   'draw:stroke-delete': (payload: StrokeDeletePayload) => void;

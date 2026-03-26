@@ -207,16 +207,19 @@ export function Whiteboard() {
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const canvasRef = useRef<CanvasHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const isViewOnlyLink = useMemo(() => {
+  const shareLinkState = useMemo(() => {
     if (typeof window === "undefined") {
-      return false;
+      return { roomId: "", viewOnly: false, accessToken: "" };
     }
 
-    return parseShareableLink(window.location.search).viewOnly;
+    return parseShareableLink(window.location.search);
   }, []);
+  const isViewOnlyLink = shareLinkState.viewOnly;
   const isReadOnly = Boolean(
     roomState && (isViewOnlyLink || roomState.metadata.roomMode === "readonly"),
   );
+  const isBoardOwner = currentUser?.role === "owner";
+  const canManageBoard = Boolean(currentUser && isBoardOwner && !isViewOnlyLink);
 
   const showToastMessage = useCallback((message: string) => {
     if (toastTimeoutRef.current) {
@@ -533,19 +536,32 @@ export function Whiteboard() {
   }, [sendClear, showToastMessage]);
 
   const handleShare = useCallback((viewOnly = false) => {
-    if (!currentUser) return;
+    if (!currentUser || !roomState) return;
     if (isViewOnlyLink && !viewOnly) {
       showToastMessage("View-only sessions can only copy the view link.");
       return;
     }
 
-    const link = getShareableLink(currentUser.roomId, viewOnly);
+    const accessToken =
+      roomState.metadata.accessLevel === "private"
+        ? roomState.metadata.inviteToken
+        : undefined;
+    const link = getShareableLink(currentUser.roomId, {
+      viewOnly,
+      accessToken,
+    });
     copyToClipboard(link).then(() => {
       showToastMessage(
-        viewOnly ? "View-only link copied to clipboard." : "Edit link copied to clipboard.",
+        viewOnly
+          ? roomState.metadata.accessLevel === "private"
+            ? "Private view link copied to clipboard."
+            : "View-only link copied to clipboard."
+          : roomState.metadata.accessLevel === "private"
+            ? "Private edit link copied to clipboard."
+            : "Edit link copied to clipboard.",
       );
     });
-  }, [currentUser, isViewOnlyLink, showToastMessage]);
+  }, [currentUser, isViewOnlyLink, roomState, showToastMessage]);
 
   const handleExportJSON = useCallback(() => {
     if (!roomState || !currentUser) return;
@@ -625,9 +641,11 @@ export function Whiteboard() {
         const content = event.target?.result as string;
         const data = parseImportData(content);
         if (data) {
-          updateBoardMetadata({
-            theme: data.metadata.theme,
-          });
+          if (canManageBoard) {
+            updateBoardMetadata({
+              theme: data.metadata.theme,
+            });
+          }
           data.strokes.forEach((stroke) => sendStroke(stroke));
           data.elements.forEach((element) => sendElement(element));
           showToastMessage(
@@ -640,7 +658,7 @@ export function Whiteboard() {
       reader.readAsText(file);
       e.target.value = "";
     },
-    [isReadOnly, sendElement, sendStroke, showToastMessage, updateBoardMetadata],
+    [canManageBoard, isReadOnly, sendElement, sendStroke, showToastMessage, updateBoardMetadata],
   );
 
   const handleMouseMove = useMemo(
@@ -716,7 +734,7 @@ export function Whiteboard() {
 
   const handleBoardBackgroundChange = useCallback(
     (background: (typeof BOARD_BACKGROUND_OPTIONS)[number]["id"]) => {
-      if (isViewOnlyLink) {
+      if (!canManageBoard) {
         return;
       }
 
@@ -729,7 +747,7 @@ export function Whiteboard() {
       showToastMessage(`Board background switched to ${background}.`);
     },
     [
-      isViewOnlyLink,
+      canManageBoard,
       roomState?.metadata.theme.template,
       showToastMessage,
       updateBoardMetadata,
@@ -738,7 +756,7 @@ export function Whiteboard() {
 
   const handleBoardTemplateChange = useCallback(
     (template: (typeof BOARD_TEMPLATE_OPTIONS)[number]["id"]) => {
-      if (isViewOnlyLink) {
+      if (!canManageBoard) {
         return;
       }
 
@@ -755,7 +773,7 @@ export function Whiteboard() {
       );
     },
     [
-      isViewOnlyLink,
+      canManageBoard,
       roomState?.metadata.theme.background,
       showToastMessage,
       updateBoardMetadata,
@@ -764,7 +782,7 @@ export function Whiteboard() {
 
   const handleRoomModeChange = useCallback(
     (roomMode: "edit" | "readonly") => {
-      if (isViewOnlyLink) {
+      if (!canManageBoard) {
         return;
       }
 
@@ -775,7 +793,23 @@ export function Whiteboard() {
           : "Board is editable again.",
       );
     },
-    [isViewOnlyLink, showToastMessage, updateBoardMetadata],
+    [canManageBoard, showToastMessage, updateBoardMetadata],
+  );
+
+  const handleAccessLevelChange = useCallback(
+    (accessLevel: "public" | "private") => {
+      if (!canManageBoard) {
+        return;
+      }
+
+      updateBoardMetadata({ accessLevel });
+      showToastMessage(
+        accessLevel === "private"
+          ? "Board switched to private invite-only access."
+          : "Board is now public for anyone with the room code.",
+      );
+    },
+    [canManageBoard, showToastMessage, updateBoardMetadata],
   );
 
   const applySelectionUpdates = useCallback(
@@ -943,6 +977,24 @@ export function Whiteboard() {
                 }`}
               >
                 {isReadOnly ? "Read-only" : "Editable"}
+              </span>
+              <span
+                className={`rounded-full px-2 py-0.5 font-semibold ${
+                  roomState.metadata.accessLevel === "private"
+                    ? "bg-slate-900 text-white"
+                    : "bg-sky-100 text-sky-800"
+                }`}
+              >
+                {roomState.metadata.accessLevel === "private"
+                  ? "Private"
+                  : "Public"}
+              </span>
+              <span className="rounded-full bg-violet-100 px-2 py-0.5 font-semibold text-violet-800">
+                {isBoardOwner
+                  ? "Owner"
+                  : roomState.metadata.ownerName
+                    ? `Owner: ${roomState.metadata.ownerName}`
+                    : "Shared board"}
               </span>
               <span className="hidden sm:inline">&bull;</span>
               <span className="hidden sm:inline">
@@ -1376,6 +1428,51 @@ export function Whiteboard() {
                 </button>
               </div>
 
+              <div className="mt-4 rounded-xl border border-dashed border-gray-200 bg-gray-50 px-3 py-3">
+                <p className="text-sm font-medium text-gray-800">
+                  {isBoardOwner
+                    ? "You own this board on this device."
+                    : roomState.metadata.ownerName
+                      ? `${roomState.metadata.ownerName} manages privacy and board-wide settings.`
+                      : "Board-wide privacy and settings are managed by the owner."}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {roomState.metadata.accessLevel === "private"
+                    ? "Private boards require an invite link with an access token."
+                    : "Public boards can be joined with the room code alone."}
+                </p>
+              </div>
+
+              <div className="mt-4">
+                <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
+                  Access Level
+                </label>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => handleAccessLevelChange("public")}
+                    disabled={!canManageBoard}
+                    className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
+                      roomState.metadata.accessLevel === "public"
+                        ? "bg-sky-600 text-white"
+                        : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    } ${!canManageBoard ? "cursor-not-allowed opacity-50" : ""}`}
+                  >
+                    Public
+                  </button>
+                  <button
+                    onClick={() => handleAccessLevelChange("private")}
+                    disabled={!canManageBoard}
+                    className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
+                      roomState.metadata.accessLevel === "private"
+                        ? "bg-slate-900 text-white"
+                        : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    } ${!canManageBoard ? "cursor-not-allowed opacity-50" : ""}`}
+                  >
+                    Invite-only
+                  </button>
+                </div>
+              </div>
+
               <div className="mt-4">
                 <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
                   Room Mode
@@ -1383,23 +1480,23 @@ export function Whiteboard() {
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <button
                     onClick={() => handleRoomModeChange("edit")}
-                    disabled={isViewOnlyLink}
+                    disabled={!canManageBoard}
                     className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
                       roomState.metadata.roomMode === "edit"
                         ? "bg-emerald-600 text-white"
                         : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                    } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                    } ${!canManageBoard ? "cursor-not-allowed opacity-50" : ""}`}
                   >
                     Editable
                   </button>
                   <button
                     onClick={() => handleRoomModeChange("readonly")}
-                    disabled={isViewOnlyLink}
+                    disabled={!canManageBoard}
                     className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
                       roomState.metadata.roomMode === "readonly"
                         ? "bg-amber-500 text-white"
                         : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                    } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                    } ${!canManageBoard ? "cursor-not-allowed opacity-50" : ""}`}
                   >
                     Read-only
                   </button>
@@ -1420,12 +1517,12 @@ export function Whiteboard() {
                       <button
                         key={backgroundOption.id}
                         onClick={() => handleBoardBackgroundChange(backgroundOption.id)}
-                        disabled={isViewOnlyLink}
+                        disabled={!canManageBoard}
                         className={`rounded-2xl border p-2 text-left transition-all ${
                           isActive
                             ? "border-primary-500 ring-2 ring-primary-100"
                             : "border-gray-200 hover:border-gray-300"
-                        } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                        } ${!canManageBoard ? "cursor-not-allowed opacity-50" : ""}`}
                       >
                         <div
                           className="h-14 rounded-xl border border-black/5"
@@ -1457,12 +1554,12 @@ export function Whiteboard() {
                       <button
                         key={templateOption.id}
                         onClick={() => handleBoardTemplateChange(templateOption.id)}
-                        disabled={isViewOnlyLink}
+                        disabled={!canManageBoard}
                         className={`w-full rounded-2xl border px-3 py-3 text-left transition-colors ${
                           isActive
                             ? "border-primary-500 bg-primary-50"
                             : "border-gray-200 hover:bg-gray-50"
-                        } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                        } ${!canManageBoard ? "cursor-not-allowed opacity-50" : ""}`}
                       >
                         <p className="text-sm font-semibold text-gray-800">
                           {templateOption.label}
@@ -1728,7 +1825,7 @@ export function Whiteboard() {
 
       {showExportMenu && (
         <div
-          className="fixed inset-0 z-40"
+          className="fixed inset-0 z-20"
           onClick={() => setShowExportMenu(false)}
         />
       )}

@@ -13,6 +13,7 @@ import {
   disconnectSocket,
   TypedSocket,
 } from "../utils/socket";
+import { getOrCreateAuthIdentity } from "../utils/auth";
 import { getOrCreateClientId } from "../utils/presence";
 import type {
   BoardMetadata,
@@ -62,7 +63,7 @@ interface SocketContextValue {
   reactions: BoardReaction[];
   canUndo: boolean;
   canRedo: boolean;
-  joinRoom: (roomId: string, userName: string) => void;
+  joinRoom: (roomId: string, userName: string, accessToken?: string) => void;
   leaveRoom: () => void;
   sendStroke: (stroke: DrawStroke, options?: MutationOptions) => void;
   sendClear: () => void;
@@ -167,6 +168,7 @@ function mergeUsers(users: User[], nextUser: User): User[] {
 }
 
 export function SocketProvider({ children }: { children: ReactNode }) {
+  const authIdentityRef = useRef(getOrCreateAuthIdentity());
   const clientIdRef = useRef(getOrCreateClientId());
   const [socket] = useState(() => getSocket());
   const [isConnected, setIsConnected] = useState(false);
@@ -189,7 +191,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   const roomStateRef = useRef<RoomState | null>(null);
   const currentUserRef = useRef<User | null>(null);
-  const lastRoomInfoRef = useRef<{ roomId: string; userName: string } | null>(
+  const lastRoomInfoRef = useRef<{
+    roomId: string;
+    userName: string;
+    accessToken?: string;
+  } | null>(
     null,
   );
   const awaitingRoomRejoinRef = useRef(false);
@@ -578,6 +584,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         socket.emit("room:join", {
           ...lastRoomInfoRef.current,
           clientId: clientIdRef.current,
+          accountId: authIdentityRef.current.accountId,
+          authToken: authIdentityRef.current.authToken,
         });
         return;
       }
@@ -646,6 +654,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       lastRoomInfoRef.current = {
         roomId: data.user.roomId,
         userName: data.user.name,
+        accessToken: lastRoomInfoRef.current?.accessToken,
       };
 
       processedStrokesRef.current = new Set(
@@ -845,11 +854,18 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   ]);
 
   const joinRoom = useCallback(
-    (roomId: string, userName: string) => {
-      lastRoomInfoRef.current = { roomId, userName };
+    (roomId: string, userName: string, accessToken?: string) => {
+      lastRoomInfoRef.current = { roomId, userName, accessToken };
       setIsJoiningRoom(true);
       setLastError(null);
-      socket.emit("room:join", { roomId, userName, clientId: clientIdRef.current });
+      socket.emit("room:join", {
+        roomId,
+        userName,
+        clientId: clientIdRef.current,
+        accountId: authIdentityRef.current.accountId,
+        authToken: authIdentityRef.current.authToken,
+        accessToken,
+      });
     },
     [socket],
   );

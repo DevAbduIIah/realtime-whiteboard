@@ -78,8 +78,10 @@ export interface CursorPosition {
 export interface User {
   id: string;
   clientId: string;
+  accountId: string;
   name: string;
   roomId: string;
+  role: 'owner' | 'editor';
   status: PresenceStatus;
   lastActiveAt: number;
 }
@@ -100,8 +102,10 @@ export interface BoardMetadata {
   updatedAt: string;
   revision: number;
   ownerId?: string;
+  ownerName?: string;
   accessLevel: 'public' | 'private';
   shareLink?: string;
+  inviteToken?: string;
   roomMode: RoomMode;
   theme: BoardTheme;
 }

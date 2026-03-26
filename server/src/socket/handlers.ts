@@ -8,12 +8,17 @@ import type {
   RoomState,
   WhiteboardElement,
 } from '../types/index.js';
-import { getOrCreateBoard, updateBoardContent } from '../storage/boardStore.js';
+import {
+  getOrCreateBoard,
+  updateBoardContent,
+  type BoardSecurity,
+} from '../storage/boardStore.js';
 
 type TypedSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 type TypedServer = Server<ClientToServerEvents, ServerToClientEvents>;
 
 interface ExtendedRoomState extends RoomState {
+  security: BoardSecurity;
   strokeIds: Set<string>;
   elementIds: Set<string>;
   lastActivity: number;
@@ -21,7 +26,12 @@ interface ExtendedRoomState extends RoomState {
 }
 
 const rooms = new Map<string, ExtendedRoomState>();
-const userSockets = new Map<string, User>();
+interface ConnectedUserSession {
+  user: User;
+  authToken: string;
+}
+
+const userSockets = new Map<string, ConnectedUserSession>();
 
 // Room cleanup grace period (5 minutes)
 const ROOM_CLEANUP_DELAY = 5 * 60 * 1000;
@@ -61,6 +71,7 @@ function touchRoomMetadata(roomState: ExtendedRoomState): void {
   const now = new Date().toISOString();
   roomState.metadata = {
     ...roomState.metadata,
+    inviteToken: roomState.security.inviteToken,
     updatedAt: now,
     revision: roomState.metadata.revision + 1,
   };
@@ -73,13 +84,16 @@ function isRoomReadOnly(roomState: ExtendedRoomState): boolean {
 function mergeMetadata(
   currentMetadata: BoardMetadata,
   updates: Partial<BoardMetadata>,
+  roomState: ExtendedRoomState,
 ): BoardMetadata {
   return {
     ...currentMetadata,
     title: updates.title ?? currentMetadata.title,
-    ownerId: updates.ownerId ?? currentMetadata.ownerId,
+    ownerId: currentMetadata.ownerId,
+    ownerName: currentMetadata.ownerName,
     accessLevel: updates.accessLevel ?? currentMetadata.accessLevel,
     shareLink: updates.shareLink ?? currentMetadata.shareLink,
+    inviteToken: roomState.security.inviteToken,
     theme: {
       ...currentMetadata.theme,
       ...updates.theme,
@@ -93,6 +107,60 @@ function mergeMetadata(
   };
 }
 
+function isOwnerSession(
+  roomState: ExtendedRoomState,
+  accountId: string,
+  authToken: string,
+): boolean {
+  return Boolean(
+    roomState.metadata.ownerId &&
+      roomState.metadata.ownerId === accountId &&
+      roomState.security.ownerAuthToken &&
+      roomState.security.ownerAuthToken === authToken,
+  );
+}
+
+function ensureBoardOwner(
+  roomState: ExtendedRoomState,
+  accountId: string,
+  authToken: string,
+  userName: string,
+): boolean {
+  if (roomState.metadata.ownerId) {
+    return false;
+  }
+
+  roomState.security = {
+    ...roomState.security,
+    ownerAuthToken: authToken,
+  };
+  roomState.metadata = {
+    ...roomState.metadata,
+    ownerId: accountId,
+    ownerName: userName,
+    inviteToken: roomState.security.inviteToken,
+  };
+  touchRoomMetadata(roomState);
+  return true;
+}
+
+function canJoinRoom(
+  roomState: ExtendedRoomState,
+  accountId: string,
+  authToken: string,
+  accessToken?: string,
+): boolean {
+  if (isOwnerSession(roomState, accountId, authToken)) {
+    return true;
+  }
+
+  if (roomState.metadata.accessLevel === 'public') {
+    return true;
+  }
+
+  return Boolean(accessToken && accessToken === roomState.security.inviteToken);
+}
+
 function saveRoomToStorage(roomId: string, roomState: ExtendedRoomState): void {
   if (roomState.saveTimeout) {
     clearTimeout(roomState.saveTimeout);
@@ -103,6 +171,7 @@ function saveRoomToStorage(roomId: string, roomState: ExtendedRoomState): void {
       roomState.strokes,
       roomState.elements,
       roomState.metadata,
+      roomState.security,
     );
     roomState.saveTimeout = null;
     console.log(`Saved board: ${roomId}`);
@@ -115,10 +184,14 @@ function getOrCreateRoom(roomId: string): ExtendedRoomState {
     const board = getOrCreateBoard(roomId);
 
     rooms.set(roomId, {
-      metadata: board.metadata,
+      metadata: {
+        ...board.metadata,
+        inviteToken: board.security.inviteToken,
+      },
       strokes: board.content.strokes || [],
       elements: normalizeElements(board.content.elements || []),
       users: [],
+      security: board.security,
       strokeIds: new Set((board.content.strokes || []).map(s => s.id)),
       elementIds: new Set((board.content.elements || []).map(e => e.id)),
       lastActivity: Date.now(),
@@ -139,7 +212,7 @@ setInterval(() => {
       if (room.saveTimeout) {
         clearTimeout(room.saveTimeout);
       }
-      updateBoardContent(roomId, room.strokes, room.elements, room.metadata);
+      updateBoardContent(roomId, room.strokes, room.elements, room.metadata, room.security);
       rooms.delete(roomId);
       console.log(`Cleaned up and saved inactive room: ${roomId}`);
     }
@@ -150,27 +223,54 @@ export function setupSocketHandlers(io: TypedServer): void {
   io.on('connection', (socket: TypedSocket) => {
     console.log(`Client connected: ${socket.id}`);
 
-    socket.on('room:join', ({ roomId, userName, clientId }) => {
+    socket.on('room:join', ({ roomId, userName, clientId, accountId, authToken, accessToken }) => {
       // Handle case where user is already in the room (reconnect scenario)
       const existingUser = userSockets.get(socket.id);
       if (existingUser) {
         handleUserLeave(socket, io);
       }
 
+      const roomState = getOrCreateRoom(roomId);
+      const didClaimOwnership = ensureBoardOwner(
+        roomState,
+        accountId,
+        authToken,
+        userName,
+      );
+      const isOwner = isOwnerSession(roomState, accountId, authToken);
+
+      if (!canJoinRoom(roomState, accountId, authToken, accessToken)) {
+        socket.emit('error', 'This private board requires a valid invite link.');
+        return;
+      }
+
       const now = Date.now();
       const user: User = {
         id: socket.id,
         clientId,
+        accountId,
         name: userName,
         roomId,
+        role: isOwner ? 'owner' : 'editor',
         status: 'online',
         lastActiveAt: now,
       };
 
-      userSockets.set(socket.id, user);
       socket.join(roomId);
+      userSockets.set(socket.id, { user, authToken });
 
-      const roomState = getOrCreateRoom(roomId);
+      if (isOwner && roomState.metadata.ownerName !== userName) {
+        roomState.metadata = {
+          ...roomState.metadata,
+          ownerName: userName,
+          inviteToken: roomState.security.inviteToken,
+        };
+        touchRoomMetadata(roomState);
+      }
+
+      if (didClaimOwnership || isOwner) {
+        saveRoomToStorage(roomId, roomState);
+      }
 
       const existingUserIndex = roomState.users.findIndex(
         (roomUser) => roomUser.clientId === clientId,
@@ -215,7 +315,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('draw:stroke', ({ stroke }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -242,7 +343,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('draw:stroke-delete', ({ strokeId }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -263,7 +365,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('draw:clear', () => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -287,7 +390,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('element:add', ({ element }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -316,7 +420,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('element:update', ({ elementId, updates }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -360,7 +465,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('element:delete', ({ elementId }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -382,7 +488,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('board:replace', ({ strokes, elements }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -408,13 +515,18 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('board:metadata-update', ({ updates }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
+      if (!isOwnerSession(roomState, user.accountId, session?.authToken ?? '')) {
+        socket.emit('error', 'Only the board owner can change board settings.');
+        return;
+      }
 
-      roomState.metadata = mergeMetadata(roomState.metadata, updates);
+      roomState.metadata = mergeMetadata(roomState.metadata, updates, roomState);
       touchRoomMetadata(roomState);
       roomState.lastActivity = Date.now();
       saveRoomToStorage(user.roomId, roomState);
@@ -423,7 +535,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('cursor:move', ({ x, y, status }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
@@ -438,7 +551,10 @@ export function setupSocketHandlers(io: TypedServer): void {
             lastActiveAt: Date.now(),
           };
           roomState.users[userIndex] = nextUser;
-          userSockets.set(socket.id, nextUser);
+          userSockets.set(socket.id, {
+            user: nextUser,
+            authToken: session?.authToken ?? '',
+          });
 
           if (nextUser.status !== user.status) {
             io.to(user.roomId).emit('room:user-updated', nextUser);
@@ -457,7 +573,8 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('reaction:add', ({ reaction }) => {
-      const user = userSockets.get(socket.id);
+      const session = userSockets.get(socket.id);
+      const user = session?.user;
       if (!user) return;
 
       const nextReaction: BoardReaction = {
@@ -479,7 +596,8 @@ export function setupSocketHandlers(io: TypedServer): void {
 }
 
 function handleUserLeave(socket: TypedSocket, io: TypedServer): void {
-  const user = userSockets.get(socket.id);
+  const session = userSockets.get(socket.id);
+  const user = session?.user;
   if (!user) return;
 
   const roomState = rooms.get(user.roomId);

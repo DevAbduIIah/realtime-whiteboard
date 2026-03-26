@@ -16,13 +16,19 @@ const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.join(__dirname, '../../data');
 const BOARDS_FILE = path.join(DATA_DIR, 'boards.json');
-const STORAGE_SCHEMA_VERSION = 3;
+const STORAGE_SCHEMA_VERSION = 4;
 const MAX_SNAPSHOTS = 3;
 const SNAPSHOT_INTERVAL = 20;
+
+export interface BoardSecurity {
+  ownerAuthToken?: string;
+  inviteToken: string;
+}
 
 export interface BoardRecord {
   metadata: BoardMetadata;
   content: BoardContent;
+  security: BoardSecurity;
 }
 
 export interface BoardSummary extends BoardMetadata {
@@ -46,8 +52,11 @@ interface LegacyBoardShape {
   updatedAt?: string;
   revision?: number;
   ownerId?: string;
+  ownerName?: string;
   accessLevel?: 'public' | 'private';
   shareLink?: string;
+  inviteToken?: string;
+  security?: Partial<BoardSecurity>;
   roomMode?: 'edit' | 'readonly';
   theme?: {
     background?: BoardBackground;
@@ -74,13 +83,32 @@ function createDefaultTheme(): BoardMetadata['theme'] {
   };
 }
 
+function generateInviteToken(): string {
+  return Math.random().toString(36).slice(2, 12);
+}
+
+function normalizeSecurity(
+  security?: Partial<BoardSecurity>,
+  inviteTokenFromMetadata?: string,
+): BoardSecurity {
+  return {
+    ownerAuthToken: security?.ownerAuthToken,
+    inviteToken:
+      security?.inviteToken ||
+      inviteTokenFromMetadata ||
+      generateInviteToken(),
+  };
+}
+
 function normalizeMetadata(metadata: BoardMetadata): BoardMetadata {
   return {
     ...metadata,
     title: metadata.title || `Board ${metadata.id}`,
     revision: Math.max(0, metadata.revision ?? 0),
+    ownerName: metadata.ownerName || undefined,
     accessLevel: metadata.accessLevel === 'private' ? 'private' : 'public',
     shareLink: metadata.shareLink || metadata.id,
+    inviteToken: metadata.inviteToken || undefined,
     roomMode: metadata.roomMode === 'readonly' ? 'readonly' : 'edit',
     theme: {
       background: metadata.theme?.background ?? 'dots',
@@ -102,45 +130,68 @@ function normalizeSnapshots(snapshots: BoardSnapshot[] = []): BoardSnapshot[] {
   }));
 }
 
-function createBoardRecord(id: string, title: string, ownerId?: string): BoardRecord {
+function createBoardRecord(
+  id: string,
+  title: string,
+  owner?: {
+    ownerId?: string;
+    ownerName?: string;
+    ownerAuthToken?: string;
+  },
+): BoardRecord {
   const now = new Date().toISOString();
+  const security = normalizeSecurity({
+    ownerAuthToken: owner?.ownerAuthToken,
+  });
 
   return {
-      metadata: {
-        id,
-        title,
-        createdAt: now,
-        updatedAt: now,
+    metadata: {
+      id,
+      title,
+      createdAt: now,
+      updatedAt: now,
       revision: 0,
-        ownerId,
-        accessLevel: 'public',
-        shareLink: id,
-        roomMode: 'edit',
-        theme: createDefaultTheme(),
-      },
+      ownerId: owner?.ownerId,
+      ownerName: owner?.ownerName,
+      accessLevel: 'public',
+      shareLink: id,
+      inviteToken: security.inviteToken,
+      roomMode: 'edit',
+      theme: createDefaultTheme(),
+    },
     content: {
       strokes: [],
       elements: [],
       snapshots: [],
     },
+    security,
   };
 }
 
 function migrateBoardRecord(input: LegacyBoardShape | BoardRecord): BoardRecord {
   if ('metadata' in input && 'content' in input) {
+    const security = normalizeSecurity(
+      'security' in input ? input.security : undefined,
+      input.metadata.inviteToken,
+    );
     return {
       metadata: {
-        ...normalizeMetadata(input.metadata),
+        ...normalizeMetadata({
+          ...input.metadata,
+          inviteToken: security.inviteToken,
+        }),
       },
       content: {
         strokes: Array.isArray(input.content.strokes) ? input.content.strokes : [],
         elements: normalizeElements(Array.isArray(input.content.elements) ? input.content.elements : []),
         snapshots: normalizeSnapshots(input.content.snapshots),
       },
+      security,
     };
   }
 
   const now = new Date().toISOString();
+  const security = normalizeSecurity(input.security, input.inviteToken);
   return {
     metadata: {
       id: input.id,
@@ -149,8 +200,10 @@ function migrateBoardRecord(input: LegacyBoardShape | BoardRecord): BoardRecord 
       updatedAt: input.updatedAt || now,
       revision: Math.max(0, input.revision ?? 0),
       ownerId: input.ownerId,
+      ownerName: input.ownerName,
       accessLevel: input.accessLevel === 'private' ? 'private' : 'public',
       shareLink: input.shareLink || input.id,
+      inviteToken: security.inviteToken,
       roomMode: input.roomMode === 'readonly' ? 'readonly' : 'edit',
       theme: {
         background: input.theme?.background ?? 'dots',
@@ -162,6 +215,7 @@ function migrateBoardRecord(input: LegacyBoardShape | BoardRecord): BoardRecord 
       elements: normalizeElements(Array.isArray(input.elements) ? input.elements : []),
       snapshots: normalizeSnapshots(input.snapshots),
     },
+    security,
   };
 }
 
@@ -264,7 +318,7 @@ export function getBoard(id: string): BoardRecord | undefined {
 }
 
 export function createBoard(title: string, ownerId?: string): BoardRecord {
-  const board = createBoardRecord(generateBoardId(), title, ownerId);
+  const board = createBoardRecord(generateBoardId(), title, { ownerId });
   boardsCache.boards.push(board);
   debouncedSave();
   return board;
@@ -275,25 +329,36 @@ export function updateBoard(
   updates: Partial<
     Pick<
       BoardMetadata,
-      'title' | 'accessLevel' | 'ownerId' | 'shareLink' | 'roomMode' | 'theme'
+      'title' | 'accessLevel' | 'ownerId' | 'ownerName' | 'shareLink' | 'inviteToken' | 'roomMode' | 'theme'
     >
   > & { name?: string },
 ): BoardRecord | undefined {
   const index = getBoardIndex(id);
   if (index === -1) return undefined;
 
+  const currentBoard = boardsCache.boards[index];
+  const security = normalizeSecurity(
+    {
+      ...currentBoard.security,
+      inviteToken: updates.inviteToken ?? currentBoard.security.inviteToken,
+    },
+    updates.inviteToken,
+  );
+
   boardsCache.boards[index] = {
-    ...boardsCache.boards[index],
+    ...currentBoard,
     metadata: normalizeMetadata({
-      ...boardsCache.boards[index].metadata,
+      ...currentBoard.metadata,
       ...updates,
       theme: {
-        ...boardsCache.boards[index].metadata.theme,
+        ...currentBoard.metadata.theme,
         ...updates.theme,
       },
-      title: updates.title || updates.name || boardsCache.boards[index].metadata.title,
+      title: updates.title || updates.name || currentBoard.metadata.title,
+      inviteToken: security.inviteToken,
       updatedAt: new Date().toISOString(),
     }),
+    security,
   };
 
   debouncedSave();
@@ -305,16 +370,24 @@ export function updateBoardContent(
   strokes: DrawStroke[],
   elements: WhiteboardElement[],
   metadataOverride?: BoardMetadata,
+  securityOverride?: BoardSecurity,
 ): BoardRecord | undefined {
   const index = getBoardIndex(id);
   if (index === -1) return undefined;
 
+  const currentBoard = boardsCache.boards[index];
+  const nextSecurity = normalizeSecurity(
+    securityOverride ?? currentBoard.security,
+    metadataOverride?.inviteToken ?? currentBoard.metadata.inviteToken,
+  );
+
   const nextMetadata: BoardMetadata = metadataOverride
-    ? normalizeMetadata({ ...metadataOverride })
+    ? normalizeMetadata({ ...metadataOverride, inviteToken: nextSecurity.inviteToken })
     : normalizeMetadata({
-        ...boardsCache.boards[index].metadata,
+        ...currentBoard.metadata,
         updatedAt: new Date().toISOString(),
-        revision: boardsCache.boards[index].metadata.revision + 1,
+        revision: currentBoard.metadata.revision + 1,
+        inviteToken: nextSecurity.inviteToken,
       });
   const normalizedElements = normalizeElements(elements);
 
@@ -327,9 +400,10 @@ export function updateBoardContent(
         nextMetadata,
         strokes,
         normalizedElements,
-        boardsCache.boards[index].content.snapshots,
+        currentBoard.content.snapshots,
       ),
     },
+    security: nextSecurity,
   };
 
   debouncedSave();
@@ -352,7 +426,11 @@ export function duplicateBoard(id: string, newTitle?: string): BoardRecord | und
   const duplicate = createBoardRecord(
     generateBoardId(),
     newTitle || `${original.metadata.title} (Copy)`,
-    original.metadata.ownerId,
+    {
+      ownerId: original.metadata.ownerId,
+      ownerName: original.metadata.ownerName,
+      ownerAuthToken: original.security.ownerAuthToken,
+    },
   );
 
   duplicate.metadata.accessLevel = original.metadata.accessLevel;

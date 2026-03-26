@@ -4,8 +4,8 @@ import type {
   BoardTemplate,
 } from "../types";
 
-export const BOARD_WIDTH = 1920;
-export const BOARD_HEIGHT = 1080;
+export const BOARD_WIDTH = 2304;
+export const BOARD_HEIGHT = 1296;
 
 interface TemplateColumn {
   title: string;

@@ -28,6 +28,26 @@ export interface ParsedImportData {
   elements: WhiteboardElement[];
 }
 
+function triggerDownload(
+  url: string,
+  filename: string,
+  revokeAfterDownload: boolean = false,
+): void {
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+
+  window.setTimeout(() => {
+    document.body.removeChild(link);
+    if (revokeAfterDownload) {
+      URL.revokeObjectURL(url);
+    }
+  }, 250);
+}
+
 function normalizeElement(element: WhiteboardElement): WhiteboardElement {
   return {
     ...element,
@@ -49,8 +69,10 @@ function createMetadata(
     updatedAt: metadata?.updatedAt || now,
     revision: Math.max(0, metadata?.revision ?? 0),
     ownerId: metadata?.ownerId,
+    ownerName: metadata?.ownerName,
     accessLevel: metadata?.accessLevel === 'private' ? 'private' : 'public',
     shareLink: metadata?.shareLink || fallbackId,
+    inviteToken: metadata?.inviteToken,
     roomMode: metadata?.roomMode === 'readonly' ? 'readonly' : 'edit',
     theme: {
       background: metadata?.theme?.background || 'dots',
@@ -158,14 +180,7 @@ export function downloadJSON(
   const json = exportToJSON(strokes, elements, metadata);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${filename}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  triggerDownload(url, `${filename}.json`, true);
 }
 
 export function parseImportData(jsonString: string): ParsedImportData | null {
@@ -215,21 +230,15 @@ export function parseImportData(jsonString: string): ParsedImportData | null {
 }
 
 export async function exportToPNG(canvas: HTMLCanvasElement, filename: string = 'whiteboard'): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (!blob) {
-        resolve();
+        reject(new Error('Unable to create PNG export.'));
         return;
       }
 
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${filename}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      triggerDownload(url, `${filename}.png`, true);
       resolve();
     }, 'image/png');
   });
@@ -365,14 +374,7 @@ export function downloadSVG(
   const svg = exportToSVG(strokes, elements, metadata);
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
-
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${filename}.svg`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  triggerDownload(url, `${filename}.svg`, true);
 }
 
 export function copyToClipboard(text: string): Promise<void> {
@@ -382,26 +384,42 @@ export function copyToClipboard(text: string): Promise<void> {
 export function parseShareableLink(search: string): {
   roomId: string;
   viewOnly: boolean;
+  accessToken: string;
 } {
   const searchParams = new URLSearchParams(search);
   const rawRoomId = searchParams.get('room') || '';
   const [roomId, nestedSearch = ''] = rawRoomId.split('?');
   const nestedParams = new URLSearchParams(nestedSearch);
+  const accessToken =
+    searchParams.get('access') ||
+    nestedParams.get('access') ||
+    '';
 
   return {
     roomId,
     viewOnly:
       searchParams.get('mode') === 'view' ||
       nestedParams.get('mode') === 'view',
+    accessToken,
   };
 }
 
-export function getShareableLink(roomId: string, viewOnly: boolean = false): string {
+export function getShareableLink(
+  roomId: string,
+  options?: {
+    viewOnly?: boolean;
+    accessToken?: string;
+  },
+): string {
   const url = new URL(window.location.origin);
   url.searchParams.set('room', roomId);
 
-  if (viewOnly) {
+  if (options?.viewOnly) {
     url.searchParams.set('mode', 'view');
+  }
+
+  if (options?.accessToken) {
+    url.searchParams.set('access', options.accessToken);
   }
 
   return url.toString();
