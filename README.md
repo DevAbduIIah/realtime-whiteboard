@@ -1,93 +1,110 @@
 # Real-Time Collaborative Whiteboard
 
-A modern, real-time collaborative whiteboard application where multiple users can join rooms and draw together live. Built as a portfolio-quality full-stack project demonstrating real-time systems, WebSocket communication, and interactive canvas drawing.
+A portfolio-quality collaborative whiteboard built with React, TypeScript, Socket.IO, and the HTML5 Canvas API. Multiple users can join the same room, draw live, manipulate elements, navigate large boards, share links, and work with persistent board state.
 
-## Features
+## Highlights
 
-### Core Collaboration
+### Collaboration
 
-- **Room-based Collaboration** - Create or join rooms with unique codes
-- **Real-time Drawing** - See others' strokes appear instantly
-- **Live Cursor Presence** - Track collaborators' cursor positions with presence status indicators (online, drawing, idle)
-- **Late Join Sync** - New users see the complete canvas state
-- **Auto-reconnection** - Seamless reconnection with room state restoration
+- Room-based collaboration with shareable room codes
+- Live drawing sync with late-join state restoration
+- Live cursor presence with online, drawing, and idle states
+- Participant list with jump-to and follow-collaborator actions
+- Quick board reactions and pings
+- Connection health, reconnect feedback, and room rejoin handling
 
-### Drawing Tools
+### Whiteboard Tools
 
-- **Brush & Eraser** - Free-form drawing with multiple sizes
-- **Shape Tools** - Rectangle, circle, line, and arrow with preview
-- **Text Tool** - Add text elements anywhere on the canvas
-- **Sticky Notes** - Create colorful sticky notes for annotations
-- **Select Tool** - Select and manipulate elements (coming soon)
-- **Color Palette** - 9 vibrant colors to choose from
-- **Size Options** - 5 brush sizes (2px to 20px)
+- Brush and eraser with multiple sizes
+- Rectangle, circle, line, and arrow tools
+- Text elements and sticky notes
+- Fully working select tool
+- Single select, multi-select, and marquee selection
+- Drag, resize, duplicate, copy, paste, and delete selected elements
+- Bring-to-front and send-to-back controls
 
-### History & Persistence
+### Viewport And Canvas
 
-- **Undo/Redo** - Full history management (up to 50 actions)
-- **Board Persistence** - Automatic saving to JSON file storage
-- **Deduplication** - Intelligent event handling prevents duplicate strokes
+- Zoom in, zoom out, fit-to-screen, and reset zoom controls
+- Space-to-pan workflow for larger boards
+- Expanded drawing surface for roomier whiteboard sessions
+- Pointer-capture drawing so strokes continue cleanly after leaving and re-entering the board
 
-### Sharing & Export
+### Board Presentation And Export
 
-- **Share Links** - Copy shareable room links instantly
-- **Export as PNG** - Download canvas as high-quality image
-- **Export as JSON** - Save complete board state
-- **Import JSON** - Load previously saved boards
+- Multiple board backgrounds: dots, grid, plain, blueprint, warm
+- Templates: blank, kanban, retrospective
+- PNG, SVG, and JSON export
+- JSON import
+- Exports preserve board presentation and content cleanly
 
-### User Experience
+### Persistence And Reliability
 
-- **Keyboard Shortcuts** - Quick access to all tools (B, E, R, O, L, A, T, S, V)
-- **Responsive Design** - Works on desktop and tablet screens
-- **Loading States** - Visual feedback for async operations
-- **Empty State** - Helpful guidance when canvas is blank
-- **Clear Confirmation** - Prevents accidental data loss
-- **Toast Notifications** - Smooth feedback for actions
-- **Grid Background** - Subtle dot grid for better spatial awareness
+- Debounced JSON-file persistence on the server
+- Board metadata with title, revision, created/updated timestamps
+- Lightweight board snapshots for recovery/version groundwork
+- Element normalization and version-aware updates
+- Event deduplication for strokes and elements
+
+### Ownership And Privacy Foundation
+
+- Device-persistent local identity foundation
+- Board owner assignment on first trusted join
+- Public or private board access
+- Invite-only private links with access tokens
+- Owner-only control for privacy, room mode, and board-wide settings
 
 ## Tech Stack
 
-| Layer      | Technology            | Purpose                                |
-| ---------- | --------------------- | -------------------------------------- |
-| Frontend   | React 18 + TypeScript | Component architecture, type safety    |
-| Build Tool | Vite                  | Fast HMR, modern bundling              |
-| Styling    | Tailwind CSS          | Utility-first, responsive design       |
-| Backend    | Node.js + Express     | API server, static hosting             |
-| Real-time  | Socket.IO             | WebSocket with fallbacks, room support |
-| Canvas     | HTML5 Canvas API      | High-performance drawing               |
+| Layer | Technology | Purpose |
+| --- | --- | --- |
+| Frontend | React 18 + TypeScript | UI, state, typed interaction flows |
+| Build Tool | Vite | Fast frontend development and bundling |
+| Styling | Tailwind CSS | Responsive styling and UI composition |
+| Backend | Node.js + Express | Server and static delivery |
+| Real-time | Socket.IO | Room-based multiplayer sync |
+| Rendering | HTML5 Canvas API | Whiteboard rendering and interaction |
+| Storage | JSON file persistence | Lightweight local persistence layer |
 
 ## Project Structure
 
-```
+```text
 collaborative-whiteboard/
-├── client/                 # React frontend
-│   ├── src/
-│   │   ├── components/     # UI components
-│   │   │   ├── Canvas.tsx
-│   │   │   ├── JoinScreen.tsx
-│   │   │   ├── Toolbar.tsx
-│   │   │   └── Whiteboard.tsx
-│   │   ├── contexts/       # React context providers
-│   │   │   └── SocketContext.tsx
-│   │   ├── hooks/          # Custom React hooks
-│   │   │   └── useCanvasDrawing.ts
-│   │   ├── types/          # TypeScript definitions
-│   │   └── utils/          # Utility functions
-│   │       ├── export.ts   # Export/import utilities
-│   │       ├── socket.ts   # Socket configuration
-│   │       ├── throttle.ts
-│   │       └── userColors.ts
-│   └── package.json
-├── server/                 # Node.js backend
-│   ├── src/
-│   │   ├── index.ts        # Express + Socket.IO setup
-│   │   ├── socket/         # Socket event handlers
-│   │   │   └── handlers.ts
-│   │   ├── storage/        # Persistence layer
-│   │   │   └── boardStore.ts
-│   │   └── types/          # Shared type definitions
-│   └── package.json
-└── package.json            # Root workspace scripts
+|-- client/
+|   |-- src/
+|   |   |-- components/
+|   |   |   |-- Canvas.tsx
+|   |   |   |-- JoinScreen.tsx
+|   |   |   |-- Toolbar.tsx
+|   |   |   `-- Whiteboard.tsx
+|   |   |-- contexts/
+|   |   |   `-- SocketContext.tsx
+|   |   |-- hooks/
+|   |   |   `-- useCanvasDrawing.ts
+|   |   |-- types/
+|   |   |   `-- index.ts
+|   |   `-- utils/
+|   |       |-- auth.ts
+|   |       |-- boardPresentation.ts
+|   |       |-- export.ts
+|   |       |-- presence.ts
+|   |       |-- socket.ts
+|   |       |-- throttle.ts
+|   |       `-- userColors.ts
+|   `-- package.json
+|-- server/
+|   |-- data/
+|   |   `-- boards.json
+|   |-- src/
+|   |   |-- socket/
+|   |   |   `-- handlers.ts
+|   |   |-- storage/
+|   |   |   `-- boardStore.ts
+|   |   |-- types/
+|   |   |   `-- index.ts
+|   |   `-- index.ts
+|   `-- package.json
+`-- package.json
 ```
 
 ## Getting Started
@@ -100,143 +117,107 @@ collaborative-whiteboard/
 ### Installation
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd collaborative-whiteboard
-
-# Install all dependencies (root, client, and server)
 npm run install:all
 ```
 
 ### Development
 
 ```bash
-# Start both client and server in development mode
 npm run dev
+```
 
-# Or run them separately:
-npm run dev:client  # Starts Vite dev server on http://localhost:5173
-npm run dev:server  # Starts Node.js server on http://localhost:3001
+This starts:
+
+- client on `http://localhost:5173`
+- server on `http://localhost:3001`
+
+You can also run them separately:
+
+```bash
+npm run dev:client
+npm run dev:server
 ```
 
 ### Production Build
 
 ```bash
-# Build the client
 npm run build
-
-# Start the server
 npm start
 ```
 
-## Architecture
-
-### Client Responsibilities
-
-- Render the canvas and handle drawing input
-- Manage local drawing state and tool selection
-- Connect to server and emit/receive socket events
-- Display remote users' strokes and cursors with presence indicators
-- Handle room join/leave flow
-- Undo/redo history management (client-side)
-- Export/import board data
-- Generate shareable links
-
-### Server Responsibilities
-
-- Manage Socket.IO connections and rooms
-- Store room state (strokes, elements, users) in memory
-- Persist boards to JSON file storage with debounced writes
-- Broadcast drawing and element events to room participants
-- Send full canvas state to late joiners
-- Handle user connect/disconnect lifecycle
-- Deduplicate events to prevent race conditions
-
-### Real-time Event Flow
-
-```
-┌─────────────┐                    ┌─────────────┐                    ┌─────────────┐
-│   User A    │                    │   Server    │                    │   User B    │
-└──────┬──────┘                    └──────┬──────┘                    └──────┬──────┘
-       │                                  │                                  │
-       │  room:join (roomId, name)        │                                  │
-       │─────────────────────────────────>│                                  │
-       │                                  │                                  │
-       │  room:joined (user, roomState)   │                                  │
-       │<─────────────────────────────────│                                  │
-       │                                  │                                  │
-       │                                  │  room:user-joined (user)         │
-       │                                  │─────────────────────────────────>│
-       │                                  │                                  │
-       │  draw:stroke (stroke)            │                                  │
-       │─────────────────────────────────>│                                  │
-       │                                  │  draw:stroke (stroke)            │
-       │                                  │─────────────────────────────────>│
-       │                                  │                                  │
-       │  cursor:move (x, y)              │                                  │
-       │─────────────────────────────────>│                                  │
-       │                                  │  cursor:update (cursor)          │
-       │                                  │─────────────────────────────────>│
-```
-
-## Socket Events
-
-| Event              | Direction       | Payload                | Description                        |
-| ------------------ | --------------- | ---------------------- | ---------------------------------- |
-| `room:join`        | Client → Server | `{ roomId, userName }` | Join a room                        |
-| `room:joined`      | Server → Client | `{ user, roomState }`  | Confirm join with full state       |
-| `room:user-joined` | Server → Room   | `user`                 | Notify others of new user          |
-| `room:user-left`   | Server → Room   | `userId`               | Notify others of user leaving      |
-| `draw:stroke`      | Bidirectional   | `{ stroke }`           | New drawing stroke                 |
-| `draw:clear`       | Bidirectional   | -                      | Clear canvas                       |
-| `element:add`      | Bidirectional   | `{ element }`          | Add element (text, sticky, shape)  |
-| `element:update`   | Bidirectional   | `{ id, updates }`      | Update existing element            |
-| `element:delete`   | Bidirectional   | `{ id }`               | Delete element                     |
-| `cursor:move`      | Client → Server | `{ x, y, status }`     | Cursor position with status update |
-| `cursor:update`    | Server → Room   | `cursor`               | Broadcast cursor to others         |
+The root `build` script now builds both the client and the server.
 
 ## Keyboard Shortcuts
 
-| Shortcut           | Action             |
-| ------------------ | ------------------ |
-| `V`                | Select tool        |
-| `B`                | Brush              |
-| `E`                | Eraser             |
-| `R`                | Rectangle          |
-| `O`                | Circle (Oval)      |
-| `L`                | Line               |
-| `A`                | Arrow              |
-| `T`                | Text               |
-| `S`                | Sticky note        |
-| `Ctrl/Cmd + Z`     | Undo               |
-| `Ctrl/Cmd + Y`     | Redo               |
-| `Ctrl + Shift + Z` | Redo (alternative) |
+| Shortcut | Action |
+| --- | --- |
+| `V` | Select tool |
+| `B` | Brush |
+| `E` | Eraser |
+| `R` | Rectangle |
+| `O` | Circle |
+| `L` | Line |
+| `A` | Arrow |
+| `T` | Text |
+| `S` | Sticky note |
+| `Esc` | Clear selection or exit reaction mode |
+| `Delete` / `Backspace` | Delete selection |
+| `Ctrl/Cmd + C` | Copy selection |
+| `Ctrl/Cmd + V` | Paste selection |
+| `Ctrl/Cmd + D` | Duplicate selection |
+| `Ctrl/Cmd + Z` | Undo |
+| `Ctrl/Cmd + Y` | Redo |
+| `Ctrl/Cmd + Shift + Z` | Redo alternative |
 
-## Core Requirements Checklist
+## Architecture Notes
 
-- [x] Room-based collaboration with room codes
-- [x] User identity with display names
-- [x] Shared live drawing synced across users
-- [x] Live cursor presence with name labels and status indicators
-- [x] Toolbar: brush, eraser, colors, sizes, clear
-- [x] Shape tools: rectangle, circle, line, arrow
-- [x] Text and sticky note elements
-- [x] Late join synchronization
-- [x] Connection lifecycle handling with auto-reconnect
-- [x] Undo/redo with 50-action history
-- [x] Board persistence to JSON file storage
-- [x] Export as PNG and JSON
-- [x] Import from JSON
-- [x] Share room links
-- [x] Keyboard shortcuts for all tools
-- [x] Polished, responsive UI
-- [x] Clean architecture with separation of concerns
-- [x] Runnable local setup
+### Client
 
-## Future Enhancements
+- Renders the board and interaction overlays
+- Tracks local drawing, selection, viewport, and presence state
+- Applies optimistic updates for drawing and element changes
+- Handles export/import, sharing, and ownership-aware UI controls
 
-- Element selection and manipulation (drag, resize, delete)
-- Database integration (PostgreSQL/MongoDB)
-- User authentication and private boards
-- Board templates and backgrounds
-- Touch/stylus support for tablets
+### Server
+
+- Manages room membership and Socket.IO event flow
+- Persists board state and metadata to JSON storage
+- Deduplicates strokes and elements
+- Enforces read-only mode, owner-only board settings, and private-board access
+
+### Ownership Model
+
+This project intentionally uses a minimal ownership foundation instead of a full auth platform:
+
+- each device gets a persistent local `accountId` and `authToken`
+- the first trusted joiner becomes the board owner
+- private boards require an invite token in the shared link
+- board-wide access/mode/theme settings are restricted to the owner
+
+This keeps the system realistic for the current codebase while leaving a clear path to future account-backed auth.
+
+## Core Checklist
+
+- [x] Real-time collaborative drawing
+- [x] Working selection and element manipulation
+- [x] Viewport zoom and pan
+- [x] Multiplayer presence and room health UI
+- [x] Shapes, text, sticky notes, and layer ordering controls
+- [x] Backgrounds and templates
+- [x] PNG, SVG, and JSON export
+- [x] JSON import
+- [x] Board persistence and metadata
+- [x] Read-only mode
+- [x] Public/private board foundation
+- [x] Responsive desktop/tablet UI
+
+## Future Roadmap
+
+- Replace local device identity with real account auth and sessions
+- Move persistence from JSON files to a database-backed model
+- Add stronger touch and stylus support, including gesture polish
+- Add richer board permissions beyond owner/editor
+- Add richer revision history and restore tooling
+- Add board browsing, rename flows, and explicit board creation UI
