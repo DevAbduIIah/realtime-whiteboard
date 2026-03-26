@@ -2,6 +2,8 @@ import type { Tool, DrawingState } from "../types";
 
 interface ToolbarProps {
   drawingState: DrawingState;
+  readOnly?: boolean;
+  selectionCount?: number;
   onToolChange: (tool: Tool) => void;
   onColorChange: (color: string) => void;
   onSizeChange: (size: number) => void;
@@ -29,6 +31,8 @@ const MAX_SIZE = 70;
 
 export function Toolbar({
   drawingState,
+  readOnly = false,
+  selectionCount = 0,
   onToolChange,
   onColorChange,
   onSizeChange,
@@ -43,16 +47,31 @@ export function Toolbar({
     drawingState.tool,
   );
   const isEraserTool = drawingState.tool === "eraser";
+  const editingDisabled = readOnly;
+
+  const getToolButtonClass = (tool: Tool) => {
+    const isActive = drawingState.tool === tool;
+    const isDisabled = editingDisabled && tool !== "select";
+
+    return `p-2.5 rounded-lg transition-all ${
+      isActive
+        ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
+        : isDisabled
+          ? "cursor-not-allowed text-gray-300"
+          : "hover:bg-gray-100 text-gray-600"
+    }`;
+  };
 
   return (
-    <div className="bg-white rounded-xl shadow-lg p-3 flex items-center gap-3 flex-wrap max-w-full">
+    <div className="max-w-full rounded-2xl border border-gray-200 bg-white/95 p-3 shadow-lg backdrop-blur-sm">
+      <div className="flex flex-wrap items-center gap-3">
       {/* Undo/Redo */}
       <div className="flex items-center gap-1">
         <button
           onClick={onUndo}
-          disabled={!canUndo}
+          disabled={!canUndo || editingDisabled}
           className={`p-2.5 rounded-lg transition-all group relative ${
-            canUndo
+            canUndo && !editingDisabled
               ? "hover:bg-gray-100 text-gray-600"
               : "text-gray-300 cursor-not-allowed"
           }`}
@@ -79,9 +98,9 @@ export function Toolbar({
         </button>
         <button
           onClick={onRedo}
-          disabled={!canRedo}
+          disabled={!canRedo || editingDisabled}
           className={`p-2.5 rounded-lg transition-all group relative ${
-            canRedo
+            canRedo && !editingDisabled
               ? "hover:bg-gray-100 text-gray-600"
               : "text-gray-300 cursor-not-allowed"
           }`}
@@ -114,11 +133,7 @@ export function Toolbar({
       <div className="flex items-center gap-1">
         <button
           onClick={() => onToolChange("select")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "select"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          className={getToolButtonClass("select")}
           title="Select (V)"
         >
           <svg
@@ -143,11 +158,8 @@ export function Toolbar({
       <div className="flex items-center gap-1">
         <button
           onClick={() => onToolChange("brush")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "brush"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("brush")}
           title="Brush (B)"
         >
           <svg
@@ -166,11 +178,8 @@ export function Toolbar({
         </button>
         <button
           onClick={() => onToolChange("eraser")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "eraser"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("eraser")}
           title="Eraser (E)"
         >
           <svg
@@ -195,11 +204,8 @@ export function Toolbar({
       <div className="flex items-center gap-1">
         <button
           onClick={() => onToolChange("rectangle")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "rectangle"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("rectangle")}
           title="Rectangle (R)"
         >
           <svg
@@ -213,11 +219,8 @@ export function Toolbar({
         </button>
         <button
           onClick={() => onToolChange("circle")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "circle"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("circle")}
           title="Circle (O)"
         >
           <svg
@@ -231,11 +234,8 @@ export function Toolbar({
         </button>
         <button
           onClick={() => onToolChange("line")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "line"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("line")}
           title="Line (L)"
         >
           <svg
@@ -256,11 +256,8 @@ export function Toolbar({
         </button>
         <button
           onClick={() => onToolChange("arrow")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "arrow"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("arrow")}
           title="Arrow (A)"
         >
           <svg
@@ -285,11 +282,8 @@ export function Toolbar({
       <div className="flex items-center gap-1">
         <button
           onClick={() => onToolChange("text")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "text"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("text")}
           title="Text (T)"
         >
           <svg
@@ -308,11 +302,8 @@ export function Toolbar({
         </button>
         <button
           onClick={() => onToolChange("sticky")}
-          className={`p-2.5 rounded-lg transition-all ${
-            drawingState.tool === "sticky"
-              ? "bg-primary-100 text-primary-600 ring-2 ring-primary-500"
-              : "hover:bg-gray-100 text-gray-600"
-          }`}
+          disabled={editingDisabled}
+          className={getToolButtonClass("sticky")}
           title="Sticky Note (S)"
         >
           <svg
@@ -351,11 +342,12 @@ export function Toolbar({
             <button
               key={color}
               onClick={() => onColorChange(color)}
+              disabled={editingDisabled}
               className={`w-6 h-6 rounded-full transition-all ${
                 drawingState.color === color
                   ? "ring-2 ring-offset-2 ring-primary-500 scale-110"
                   : "hover:scale-105"
-              }`}
+              } ${editingDisabled ? "cursor-not-allowed opacity-60" : ""}`}
               style={{ backgroundColor: color }}
               title={color}
             />
@@ -376,6 +368,7 @@ export function Toolbar({
                 min={MIN_SIZE}
                 max={MAX_SIZE}
                 value={drawingState.size}
+                disabled={editingDisabled}
                 onChange={(e) => onSizeChange(Number(e.target.value))}
                 className="w-28 accent-primary-600 cursor-pointer"
                 title={`Size ${drawingState.size}`}
@@ -387,6 +380,7 @@ export function Toolbar({
                 min={MIN_SIZE}
                 max={MAX_SIZE}
                 value={drawingState.size}
+                disabled={editingDisabled}
                 onChange={(e) => {
                   const value = Number(e.target.value);
                   if (Number.isNaN(value)) return;
@@ -407,11 +401,24 @@ export function Toolbar({
       {/* Clear */}
       <button
         onClick={onClear}
-        className="px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+        disabled={editingDisabled}
+        className="px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-transparent"
         title="Clear Canvas"
       >
         Clear
       </button>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-gray-100 pt-3 text-xs text-gray-500">
+        <span className="rounded-full bg-gray-100 px-2.5 py-1 font-semibold text-gray-600">
+          {readOnly ? "Read-only room" : "Editing enabled"}
+        </span>
+        <span>
+          {selectionCount > 0
+            ? `${selectionCount} element${selectionCount === 1 ? "" : "s"} selected`
+            : "Use the inspector to change selection properties"}
+        </span>
+      </div>
     </div>
   );
 }

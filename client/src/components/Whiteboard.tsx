@@ -6,11 +6,18 @@ import { throttle } from "../utils/throttle";
 import { getUserColor, getUserInitials } from "../utils/userColors";
 import {
   downloadJSON,
+  downloadSVG,
   exportToPNG,
   copyToClipboard,
   getShareableLink,
+  parseShareableLink,
   parseImportData,
 } from "../utils/export";
+import {
+  BOARD_BACKGROUND_OPTIONS,
+  BOARD_TEMPLATE_OPTIONS,
+  getBoardSurfaceStyle,
+} from "../utils/boardPresentation";
 import type {
   BoardReaction,
   CursorPosition,
@@ -140,6 +147,16 @@ function getConnectionCopy(
   }
 }
 
+function getSharedValue<T>(
+  values: T[],
+): T | null {
+  if (values.length === 0) {
+    return null;
+  }
+
+  return values.every((value) => value === values[0]) ? values[0] : null;
+}
+
 export function Whiteboard() {
   const {
     currentUser,
@@ -157,12 +174,14 @@ export function Whiteboard() {
     connectionStatus,
     reconnectAttempt,
     lastRejoinedAt,
+    lastError,
     canUndo,
     canRedo,
     captureHistorySnapshot,
     commitCapturedHistory,
     undo,
     redo,
+    updateBoardMetadata,
   } = useSocket();
 
   const [drawingState, setDrawingState] = useState<DrawingState>({
@@ -177,6 +196,9 @@ export function Whiteboard() {
   const [activeReactionKind, setActiveReactionKind] =
     useState<ReactionKind | null>(null);
   const [followedUserId, setFollowedUserId] = useState<string | null>(null);
+  const [selectedElements, setSelectedElements] = useState<WhiteboardElement[]>(
+    [],
+  );
 
   const lastActivityRef = useRef<number>(Date.now());
   const presenceStatusRef = useRef<PresenceStatus>("online");
@@ -185,6 +207,16 @@ export function Whiteboard() {
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const canvasRef = useRef<CanvasHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isViewOnlyLink = useMemo(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    return parseShareableLink(window.location.search).viewOnly;
+  }, []);
+  const isReadOnly = Boolean(
+    roomState && (isViewOnlyLink || roomState.metadata.roomMode === "readonly"),
+  );
 
   const showToastMessage = useCallback((message: string) => {
     if (toastTimeoutRef.current) {
@@ -225,6 +257,9 @@ export function Whiteboard() {
       }
 
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
+        if (isReadOnly) {
+          return;
+        }
         e.preventDefault();
         undo();
         return;
@@ -234,12 +269,18 @@ export function Whiteboard() {
         (e.ctrlKey || e.metaKey) &&
         (e.key === "y" || (e.key === "z" && e.shiftKey))
       ) {
+        if (isReadOnly) {
+          return;
+        }
         e.preventDefault();
         redo();
         return;
       }
 
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (isReadOnly) {
+          return;
+        }
         if (canvasRef.current?.deleteSelection()) {
           e.preventDefault();
           return;
@@ -254,6 +295,9 @@ export function Whiteboard() {
       }
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
+        if (isReadOnly) {
+          return;
+        }
         if (canvasRef.current?.pasteClipboard()) {
           e.preventDefault();
           return;
@@ -261,6 +305,9 @@ export function Whiteboard() {
       }
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        if (isReadOnly) {
+          return;
+        }
         if (canvasRef.current?.duplicateSelection()) {
           e.preventDefault();
           return;
@@ -287,27 +334,35 @@ export function Whiteboard() {
             setDrawingState((prev) => ({ ...prev, tool: "select" }));
             break;
           case "b":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "brush" }));
             break;
           case "e":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "eraser" }));
             break;
           case "r":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "rectangle" }));
             break;
           case "o":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "circle" }));
             break;
           case "l":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "line" }));
             break;
           case "a":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "arrow" }));
             break;
           case "t":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "text" }));
             break;
           case "s":
+            if (isReadOnly) break;
             setDrawingState((prev) => ({ ...prev, tool: "sticky" }));
             break;
         }
@@ -316,7 +371,7 @@ export function Whiteboard() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeReactionKind, redo, undo]);
+  }, [activeReactionKind, isReadOnly, redo, undo]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -386,11 +441,55 @@ export function Whiteboard() {
     () => getConnectionCopy(connectionStatus, reconnectAttempt),
     [connectionStatus, reconnectAttempt],
   );
+  const selectionColor = useMemo(
+    () => getSharedValue(selectedElements.map((element) => element.color)),
+    [selectedElements],
+  );
+  const selectionStrokeWidth = useMemo(() => {
+    const shapeElements = selectedElements.filter(
+      (element): element is Extract<
+        WhiteboardElement,
+        { type: "rectangle" | "circle" | "line" | "arrow" }
+      > => ["rectangle", "circle", "line", "arrow"].includes(element.type),
+    );
+
+    if (shapeElements.length === 0 || shapeElements.length !== selectedElements.length) {
+      return null;
+    }
+
+    return getSharedValue(
+      shapeElements.map((element) => element.strokeWidth),
+    );
+  }, [selectedElements]);
+  const selectionFontSize = useMemo(() => {
+    const textElements = selectedElements.filter((element) => element.type === "text");
+
+    if (textElements.length === 0 || textElements.length !== selectedElements.length) {
+      return null;
+    }
+
+    return getSharedValue(textElements.map((element) => element.fontSize));
+  }, [selectedElements]);
+
+  useEffect(() => {
+    if (!isReadOnly) {
+      return;
+    }
+
+    setDrawingState((prev) =>
+      prev.tool === "select" ? prev : { ...prev, tool: "select" },
+    );
+    setActiveReactionKind(null);
+  }, [isReadOnly]);
 
   const handleToolChange = useCallback((tool: Tool) => {
+    if (isReadOnly && tool !== "select") {
+      return;
+    }
+
     setActiveReactionKind(null);
     setDrawingState((prev) => ({ ...prev, tool }));
-  }, []);
+  }, [isReadOnly]);
 
   const handleColorChange = useCallback((color: string) => {
     setDrawingState((prev) => ({ ...prev, color }));
@@ -421,8 +520,11 @@ export function Whiteboard() {
   }, []);
 
   const handleClear = useCallback(() => {
+    if (isReadOnly) {
+      return;
+    }
     setShowClearConfirm(true);
-  }, []);
+  }, [isReadOnly]);
 
   const confirmClear = useCallback(() => {
     sendClear();
@@ -430,14 +532,20 @@ export function Whiteboard() {
     showToastMessage("Canvas cleared.");
   }, [sendClear, showToastMessage]);
 
-  const handleShare = useCallback(() => {
+  const handleShare = useCallback((viewOnly = false) => {
     if (!currentUser) return;
+    if (isViewOnlyLink && !viewOnly) {
+      showToastMessage("View-only sessions can only copy the view link.");
+      return;
+    }
 
-    const link = getShareableLink(currentUser.roomId);
+    const link = getShareableLink(currentUser.roomId, viewOnly);
     copyToClipboard(link).then(() => {
-      showToastMessage("Link copied to clipboard.");
+      showToastMessage(
+        viewOnly ? "View-only link copied to clipboard." : "Edit link copied to clipboard.",
+      );
     });
-  }, [currentUser, showToastMessage]);
+  }, [currentUser, isViewOnlyLink, showToastMessage]);
 
   const handleExportJSON = useCallback(() => {
     if (!roomState || !currentUser) return;
@@ -476,13 +584,39 @@ export function Whiteboard() {
     }
   }, [currentUser, showToastMessage]);
 
+  const handleExportSVG = useCallback(() => {
+    if (!roomState || !currentUser) return;
+
+    try {
+      downloadSVG(
+        roomState.strokes,
+        roomState.elements || [],
+        `whiteboard-${currentUser.roomId}`,
+        roomState.metadata,
+      );
+      setShowExportMenu(false);
+      showToastMessage("Exported board as SVG.");
+    } catch (error) {
+      showToastMessage("Export failed.");
+      console.error("Export error:", error);
+    }
+  }, [currentUser, roomState, showToastMessage]);
+
   const handleImportClick = useCallback(() => {
+    if (isReadOnly) {
+      return;
+    }
     fileInputRef.current?.click();
     setShowExportMenu(false);
-  }, []);
+  }, [isReadOnly]);
 
   const handleImportFile = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (isReadOnly) {
+        e.target.value = "";
+        return;
+      }
+
       const file = e.target.files?.[0];
       if (!file) return;
 
@@ -491,6 +625,9 @@ export function Whiteboard() {
         const content = event.target?.result as string;
         const data = parseImportData(content);
         if (data) {
+          updateBoardMetadata({
+            theme: data.metadata.theme,
+          });
           data.strokes.forEach((stroke) => sendStroke(stroke));
           data.elements.forEach((element) => sendElement(element));
           showToastMessage(
@@ -503,7 +640,7 @@ export function Whiteboard() {
       reader.readAsText(file);
       e.target.value = "";
     },
-    [sendElement, sendStroke, showToastMessage],
+    [isReadOnly, sendElement, sendStroke, showToastMessage, updateBoardMetadata],
   );
 
   const handleMouseMove = useMemo(
@@ -526,16 +663,22 @@ export function Whiteboard() {
 
   const handleReactionAdd = useCallback(
     (reaction: BoardReaction) => {
+      if (isReadOnly) {
+        return;
+      }
       sendReaction(reaction);
       setActiveReactionKind(null);
       showToastMessage("Reaction sent to the room.");
     },
-    [sendReaction, showToastMessage],
+    [isReadOnly, sendReaction, showToastMessage],
   );
 
   const handleReactionToggle = useCallback((kind: ReactionKind) => {
+    if (isReadOnly) {
+      return;
+    }
     setActiveReactionKind((prev) => (prev === kind ? null : kind));
-  }, []);
+  }, [isReadOnly]);
 
   const handleJumpToUser = useCallback(
     (user: User) => {
@@ -571,6 +714,195 @@ export function Whiteboard() {
     [cursors, followedUserId, showToastMessage],
   );
 
+  const handleBoardBackgroundChange = useCallback(
+    (background: (typeof BOARD_BACKGROUND_OPTIONS)[number]["id"]) => {
+      if (isViewOnlyLink) {
+        return;
+      }
+
+      updateBoardMetadata({
+        theme: {
+          background,
+          template: roomState?.metadata.theme.template ?? "blank",
+        },
+      });
+      showToastMessage(`Board background switched to ${background}.`);
+    },
+    [
+      isViewOnlyLink,
+      roomState?.metadata.theme.template,
+      showToastMessage,
+      updateBoardMetadata,
+    ],
+  );
+
+  const handleBoardTemplateChange = useCallback(
+    (template: (typeof BOARD_TEMPLATE_OPTIONS)[number]["id"]) => {
+      if (isViewOnlyLink) {
+        return;
+      }
+
+      updateBoardMetadata({
+        theme: {
+          background: roomState?.metadata.theme.background ?? "dots",
+          template,
+        },
+      });
+      showToastMessage(
+        template === "blank"
+          ? "Template cleared."
+          : `Template switched to ${template}.`,
+      );
+    },
+    [
+      isViewOnlyLink,
+      roomState?.metadata.theme.background,
+      showToastMessage,
+      updateBoardMetadata,
+    ],
+  );
+
+  const handleRoomModeChange = useCallback(
+    (roomMode: "edit" | "readonly") => {
+      if (isViewOnlyLink) {
+        return;
+      }
+
+      updateBoardMetadata({ roomMode });
+      showToastMessage(
+        roomMode === "readonly"
+          ? "Board switched to read-only mode."
+          : "Board is editable again.",
+      );
+    },
+    [isViewOnlyLink, showToastMessage, updateBoardMetadata],
+  );
+
+  const applySelectionUpdates = useCallback(
+    (
+      createUpdates: (
+        element: WhiteboardElement,
+      ) => Partial<WhiteboardElement> | null,
+    ) => {
+      if (selectedElements.length === 0 || isReadOnly) {
+        return;
+      }
+
+      captureHistorySnapshot();
+      selectedElements.forEach((element) => {
+        const updates = createUpdates(element);
+        if (updates) {
+          updateElement(element.id, updates);
+        }
+      });
+      commitCapturedHistory();
+    },
+    [
+      captureHistorySnapshot,
+      commitCapturedHistory,
+      isReadOnly,
+      selectedElements,
+      updateElement,
+    ],
+  );
+
+  const handleSelectionColorChange = useCallback(
+    (color: string) => {
+      applySelectionUpdates(() => ({ color }));
+    },
+    [applySelectionUpdates],
+  );
+
+  const handleSelectionStrokeSizeChange = useCallback(
+    (strokeWidth: number) => {
+      applySelectionUpdates((element) =>
+        ["rectangle", "circle", "line", "arrow"].includes(element.type)
+          ? { strokeWidth }
+          : null,
+      );
+    },
+    [applySelectionUpdates],
+  );
+
+  const handleSelectionFontSizeChange = useCallback(
+    (fontSize: number) => {
+      applySelectionUpdates((element) =>
+        element.type === "text" ? { fontSize } : null,
+      );
+    },
+    [applySelectionUpdates],
+  );
+
+  const handleSelectionBringToFront = useCallback(() => {
+    if (!roomState || selectedElements.length === 0 || isReadOnly) {
+      return;
+    }
+
+    const maxZIndex = roomState.elements.reduce(
+      (maxValue, element) => Math.max(maxValue, element.zIndex ?? 0),
+      0,
+    );
+
+    captureHistorySnapshot();
+    [...selectedElements]
+      .sort((left, right) => (left.zIndex ?? 0) - (right.zIndex ?? 0))
+      .forEach((element, index) => {
+        updateElement(element.id, { zIndex: maxZIndex + index + 1 });
+      });
+    commitCapturedHistory();
+    showToastMessage("Moved selection to the front.");
+  }, [
+    captureHistorySnapshot,
+    commitCapturedHistory,
+    isReadOnly,
+    roomState,
+    selectedElements,
+    showToastMessage,
+    updateElement,
+  ]);
+
+  const handleSelectionSendToBack = useCallback(() => {
+    if (!roomState || selectedElements.length === 0 || isReadOnly) {
+      return;
+    }
+
+    const minZIndex = roomState.elements.reduce(
+      (minValue, element) => Math.min(minValue, element.zIndex ?? 0),
+      0,
+    );
+
+    captureHistorySnapshot();
+    [...selectedElements]
+      .sort((left, right) => (left.zIndex ?? 0) - (right.zIndex ?? 0))
+      .forEach((element, index) => {
+        updateElement(element.id, {
+          zIndex: minZIndex - selectedElements.length + index,
+        });
+      });
+    commitCapturedHistory();
+    showToastMessage("Moved selection to the back.");
+  }, [
+    captureHistorySnapshot,
+    commitCapturedHistory,
+    isReadOnly,
+    roomState,
+    selectedElements,
+    showToastMessage,
+    updateElement,
+  ]);
+
+  const handleSelectionDuplicate = useCallback(() => {
+    if (canvasRef.current?.duplicateSelection()) {
+      showToastMessage("Duplicated selection.");
+    }
+  }, [showToastMessage]);
+
+  const handleSelectionDelete = useCallback(() => {
+    if (canvasRef.current?.deleteSelection()) {
+      showToastMessage("Deleted selection.");
+    }
+  }, [showToastMessage]);
+
   if (!currentUser || !roomState) {
     return null;
   }
@@ -602,6 +934,15 @@ export function Whiteboard() {
             <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
               <span className="max-w-[110px] truncate rounded bg-gray-100 px-2 py-0.5 font-mono sm:max-w-none">
                 {currentUser.roomId}
+              </span>
+              <span
+                className={`rounded-full px-2 py-0.5 font-semibold ${
+                  isReadOnly
+                    ? "bg-amber-100 text-amber-800"
+                    : "bg-emerald-100 text-emerald-800"
+                }`}
+              >
+                {isReadOnly ? "Read-only" : "Editable"}
               </span>
               <span className="hidden sm:inline">&bull;</span>
               <span className="hidden sm:inline">
@@ -653,9 +994,9 @@ export function Whiteboard() {
           <div className="hidden h-8 w-px bg-gray-200 sm:block" />
 
           <button
-            onClick={handleShare}
+            onClick={() => handleShare(isViewOnlyLink)}
             className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 md:px-3"
-            title="Copy shareable link"
+            title={isViewOnlyLink ? "Copy view-only link" : "Copy shareable link"}
             aria-label="Share"
           >
             <svg
@@ -671,7 +1012,9 @@ export function Whiteboard() {
                 d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"
               />
             </svg>
-            <span className="hidden md:inline">Share</span>
+            <span className="hidden md:inline">
+              {isViewOnlyLink ? "Copy View Link" : "Share"}
+            </span>
           </button>
 
           <div className="relative">
@@ -749,10 +1092,36 @@ export function Whiteboard() {
                   </svg>
                   Export PNG
                 </button>
+                <button
+                  onClick={handleExportSVG}
+                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                >
+                  <svg
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M7 20h10a2 2 0 002-2V8.414a2 2 0 00-.586-1.414l-2.414-2.414A2 2 0 0014.586 4H7a2 2 0 00-2 2v12a2 2 0 002 2z"
+                    />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M8 13l2.5-3 2.5 3 2.5-3"
+                    />
+                  </svg>
+                  Export SVG
+                </button>
                 <div className="my-1 border-t border-gray-200" />
                 <button
                   onClick={handleImportClick}
-                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                  disabled={isReadOnly}
+                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:text-gray-300"
                 >
                   <svg
                     className="h-4 w-4"
@@ -795,6 +1164,8 @@ export function Whiteboard() {
           <div className="flex justify-center xl:flex-1 xl:justify-start">
             <Toolbar
               drawingState={drawingState}
+              readOnly={isReadOnly}
+              selectionCount={selectedElements.length}
               onToolChange={handleToolChange}
               onColorChange={handleColorChange}
               onSizeChange={handleSizeChange}
@@ -807,27 +1178,33 @@ export function Whiteboard() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-gray-200 bg-white/90 p-2 shadow-sm backdrop-blur-sm">
-            {REACTION_OPTIONS.map((reactionOption) => {
-              const isActive = activeReactionKind === reactionOption.kind;
+            {isReadOnly ? (
+              <div className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+                Editing tools are paused while this board is read-only.
+              </div>
+            ) : (
+              REACTION_OPTIONS.map((reactionOption) => {
+                const isActive = activeReactionKind === reactionOption.kind;
 
-              return (
-                <button
-                  key={reactionOption.kind}
-                  onClick={() => handleReactionToggle(reactionOption.kind)}
-                  className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition-all ${
-                    isActive
-                      ? "bg-primary-600 text-white shadow-sm"
-                      : "bg-gray-50 text-gray-700 hover:bg-gray-100"
-                  }`}
-                  title={reactionOption.description}
-                >
-                  <span className="text-xs font-semibold">
-                    {reactionOption.badge}
-                  </span>
-                  <span>{reactionOption.label}</span>
-                </button>
-              );
-            })}
+                return (
+                  <button
+                    key={reactionOption.kind}
+                    onClick={() => handleReactionToggle(reactionOption.kind)}
+                    className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition-all ${
+                      isActive
+                        ? "bg-primary-600 text-white shadow-sm"
+                        : "bg-gray-50 text-gray-700 hover:bg-gray-100"
+                    }`}
+                    title={reactionOption.description}
+                  >
+                    <span className="text-xs font-semibold">
+                      {reactionOption.badge}
+                    </span>
+                    <span>{reactionOption.label}</span>
+                  </button>
+                );
+              })
+            )}
           </div>
         </div>
 
@@ -839,18 +1216,35 @@ export function Whiteboard() {
               </div>
             )}
 
+            {lastError && (
+              <div className="absolute left-1/2 top-16 z-20 max-w-[min(92%,540px)] -translate-x-1/2 rounded-2xl border border-rose-200 bg-white/95 px-4 py-3 text-sm text-rose-700 shadow-lg backdrop-blur-sm">
+                {lastError}
+              </div>
+            )}
+
+            {isReadOnly && (
+              <div className="absolute bottom-4 left-4 z-20 max-w-sm rounded-2xl border border-amber-200 bg-white/95 px-4 py-3 text-sm text-amber-800 shadow-lg backdrop-blur-sm">
+                {isViewOnlyLink
+                  ? "You joined from a view-only link, so editing controls are disabled on this device."
+                  : "This room is in read-only mode for everyone until someone switches it back to edit mode."}
+              </div>
+            )}
+
             <Canvas
               ref={canvasRef}
+              metadata={roomState.metadata}
               strokes={roomState.strokes}
               elements={roomState.elements || []}
               drawingState={drawingState}
               userId={currentUser.id}
+              readOnly={isReadOnly}
               onStrokeComplete={handleStrokeComplete}
               onElementAdd={handleElementAdd}
               onElementUpdate={updateElement}
               onElementDelete={deleteElement}
               onSelectionMutationStart={captureHistorySnapshot}
               onSelectionMutationEnd={commitCapturedHistory}
+              onSelectionChange={setSelectedElements}
               onDrawStart={handleDrawStart}
               onMouseMove={handleMouseMove}
               cursors={cursors}
@@ -947,6 +1341,269 @@ export function Whiteboard() {
                       : "Jump or follow a collaborator from the list below."}
                 </p>
               </div>
+            </section>
+
+            <section className="rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary-500">
+                    Board Controls
+                  </p>
+                  <h2 className="mt-1 text-lg font-semibold text-gray-900">
+                    Appearance & Access
+                  </h2>
+                </div>
+                <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-600">
+                  {roomState.metadata.theme.template === "blank"
+                    ? roomState.metadata.theme.background
+                    : `${roomState.metadata.theme.template} template`}
+                </span>
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => handleShare(false)}
+                  disabled={isViewOnlyLink}
+                  className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-white"
+                >
+                  Copy Edit Link
+                </button>
+                <button
+                  onClick={() => handleShare(true)}
+                  className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                >
+                  Copy View Link
+                </button>
+              </div>
+
+              <div className="mt-4">
+                <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
+                  Room Mode
+                </label>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => handleRoomModeChange("edit")}
+                    disabled={isViewOnlyLink}
+                    className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
+                      roomState.metadata.roomMode === "edit"
+                        ? "bg-emerald-600 text-white"
+                        : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                  >
+                    Editable
+                  </button>
+                  <button
+                    onClick={() => handleRoomModeChange("readonly")}
+                    disabled={isViewOnlyLink}
+                    className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
+                      roomState.metadata.roomMode === "readonly"
+                        ? "bg-amber-500 text-white"
+                        : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                  >
+                    Read-only
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
+                  Background
+                </label>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  {BOARD_BACKGROUND_OPTIONS.map((backgroundOption) => {
+                    const surfaceStyle = getBoardSurfaceStyle(backgroundOption.id);
+                    const isActive =
+                      roomState.metadata.theme.background === backgroundOption.id;
+
+                    return (
+                      <button
+                        key={backgroundOption.id}
+                        onClick={() => handleBoardBackgroundChange(backgroundOption.id)}
+                        disabled={isViewOnlyLink}
+                        className={`rounded-2xl border p-2 text-left transition-all ${
+                          isActive
+                            ? "border-primary-500 ring-2 ring-primary-100"
+                            : "border-gray-200 hover:border-gray-300"
+                        } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                      >
+                        <div
+                          className="h-14 rounded-xl border border-black/5"
+                          style={{
+                            backgroundColor: surfaceStyle.backgroundColor,
+                            backgroundImage: surfaceStyle.backgroundImage,
+                            backgroundSize: surfaceStyle.backgroundSize,
+                          }}
+                        />
+                        <p className="mt-2 text-sm font-semibold text-gray-800">
+                          {backgroundOption.label}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
+                  Template
+                </label>
+                <div className="mt-2 space-y-2">
+                  {BOARD_TEMPLATE_OPTIONS.map((templateOption) => {
+                    const isActive =
+                      roomState.metadata.theme.template === templateOption.id;
+
+                    return (
+                      <button
+                        key={templateOption.id}
+                        onClick={() => handleBoardTemplateChange(templateOption.id)}
+                        disabled={isViewOnlyLink}
+                        className={`w-full rounded-2xl border px-3 py-3 text-left transition-colors ${
+                          isActive
+                            ? "border-primary-500 bg-primary-50"
+                            : "border-gray-200 hover:bg-gray-50"
+                        } ${isViewOnlyLink ? "cursor-not-allowed opacity-50" : ""}`}
+                      >
+                        <p className="text-sm font-semibold text-gray-800">
+                          {templateOption.label}
+                        </p>
+                        <p className="mt-1 text-xs text-gray-500">
+                          {templateOption.description}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary-500">
+                    Inspector
+                  </p>
+                  <h2 className="mt-1 text-lg font-semibold text-gray-900">
+                    {selectedElements.length > 0
+                      ? `${selectedElements.length} selected`
+                      : "No selection"}
+                  </h2>
+                </div>
+                {selectedElements.length > 0 && (
+                  <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-600">
+                    Layers
+                  </span>
+                )}
+              </div>
+
+              {selectedElements.length === 0 ? (
+                <div className="mt-4 rounded-2xl border border-dashed border-gray-200 bg-gray-50 px-4 py-4 text-sm text-gray-500">
+                  Select one or more elements to adjust color, layer order, and type-specific properties.
+                </div>
+              ) : (
+                <div className="mt-4 space-y-4">
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={handleSelectionBringToFront}
+                      disabled={isReadOnly}
+                      className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Bring to Front
+                    </button>
+                    <button
+                      onClick={handleSelectionSendToBack}
+                      disabled={isReadOnly}
+                      className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Send to Back
+                    </button>
+                    <button
+                      onClick={handleSelectionDuplicate}
+                      disabled={isReadOnly}
+                      className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Duplicate
+                    </button>
+                    <button
+                      onClick={handleSelectionDelete}
+                      disabled={isReadOnly}
+                      className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Delete
+                    </button>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
+                      Color
+                    </label>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {[
+                        "#000000",
+                        "#EF4444",
+                        "#F97316",
+                        "#EAB308",
+                        "#22C55E",
+                        "#14B8A6",
+                        "#3B82F6",
+                        "#8B5CF6",
+                        "#EC4899",
+                      ].map((color) => (
+                        <button
+                          key={color}
+                          onClick={() => handleSelectionColorChange(color)}
+                          disabled={isReadOnly}
+                          className={`h-7 w-7 rounded-full transition-transform ${
+                            selectionColor === color
+                              ? "ring-2 ring-primary-500 ring-offset-2"
+                              : "hover:scale-105"
+                          } ${isReadOnly ? "cursor-not-allowed opacity-60" : ""}`}
+                          style={{ backgroundColor: color }}
+                          title={color}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {selectionStrokeWidth !== null && (
+                    <div>
+                      <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
+                        Stroke Width
+                      </label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={24}
+                        value={selectionStrokeWidth}
+                        disabled={isReadOnly}
+                        onChange={(event) =>
+                          handleSelectionStrokeSizeChange(Number(event.target.value))
+                        }
+                        className="mt-2 w-full accent-primary-600"
+                      />
+                    </div>
+                  )}
+
+                  {selectionFontSize !== null && (
+                    <div>
+                      <label className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">
+                        Font Size
+                      </label>
+                      <input
+                        type="range"
+                        min={12}
+                        max={72}
+                        value={selectionFontSize}
+                        disabled={isReadOnly}
+                        onChange={(event) =>
+                          handleSelectionFontSizeChange(Number(event.target.value))
+                        }
+                        className="mt-2 w-full accent-primary-600"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
 
             <section className="flex min-h-0 flex-col rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur-sm">

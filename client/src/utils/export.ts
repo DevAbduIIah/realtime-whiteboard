@@ -1,3 +1,8 @@
+import {
+  BOARD_HEIGHT,
+  BOARD_WIDTH,
+  getBoardSvgPresentation,
+} from './boardPresentation';
 import type { BoardMetadata, DrawStroke, WhiteboardElement } from '../types';
 
 export interface ExportData {
@@ -27,6 +32,7 @@ function normalizeElement(element: WhiteboardElement): WhiteboardElement {
   return {
     ...element,
     version: Math.max(1, element.version ?? 1),
+    zIndex: typeof element.zIndex === 'number' ? element.zIndex : 0,
   };
 }
 
@@ -45,6 +51,11 @@ function createMetadata(
     ownerId: metadata?.ownerId,
     accessLevel: metadata?.accessLevel === 'private' ? 'private' : 'public',
     shareLink: metadata?.shareLink || fallbackId,
+    roomMode: metadata?.roomMode === 'readonly' ? 'readonly' : 'edit',
+    theme: {
+      background: metadata?.theme?.background || 'dots',
+      template: metadata?.theme?.template || 'blank',
+    },
   };
 }
 
@@ -224,12 +235,174 @@ export async function exportToPNG(canvas: HTMLCanvasElement, filename: string = 
   });
 }
 
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function getSvgStrokePath(stroke: DrawStroke): string {
+  if (stroke.points.length === 0) {
+    return '';
+  }
+
+  if (stroke.points.length === 1) {
+    const point = stroke.points[0];
+    return `M ${point.x} ${point.y} L ${point.x + 0.01} ${point.y + 0.01}`;
+  }
+
+  const commands = [`M ${stroke.points[0].x} ${stroke.points[0].y}`];
+
+  for (let index = 1; index < stroke.points.length; index += 1) {
+    const previousPoint = stroke.points[index - 1];
+    const currentPoint = stroke.points[index];
+    const midX = (previousPoint.x + currentPoint.x) / 2;
+    const midY = (previousPoint.y + currentPoint.y) / 2;
+    commands.push(`Q ${previousPoint.x} ${previousPoint.y} ${midX} ${midY}`);
+  }
+
+  const lastPoint = stroke.points[stroke.points.length - 1];
+  commands.push(`L ${lastPoint.x} ${lastPoint.y}`);
+  return commands.join(' ');
+}
+
+function getLineHeight(fontSize: number): number {
+  return fontSize * 1.2;
+}
+
+function getOrderedElements(elements: WhiteboardElement[]): WhiteboardElement[] {
+  return [...elements].sort((left, right) => (left.zIndex ?? 0) - (right.zIndex ?? 0));
+}
+
+export function exportToSVG(
+  strokes: DrawStroke[],
+  elements: WhiteboardElement[],
+  metadata: Partial<BoardMetadata> | undefined,
+): string {
+  const resolvedMetadata = createMetadata(metadata, metadata?.id || 'whiteboard');
+  const boardPresentation = getBoardSvgPresentation(resolvedMetadata);
+  const strokeMarkup = strokes
+    .map((stroke) => {
+      const strokeColor = stroke.tool === 'eraser' ? '#ffffff' : stroke.color;
+      return `<path d="${getSvgStrokePath(stroke)}" fill="none" stroke="${strokeColor}" stroke-width="${stroke.size}" stroke-linecap="round" stroke-linejoin="round" />`;
+    })
+    .join('');
+  const elementMarkup = getOrderedElements(elements)
+    .map((element) => {
+      switch (element.type) {
+        case 'rectangle': {
+          return `<rect x="${element.x}" y="${element.y}" width="${element.width}" height="${element.height}" fill="${element.fill || 'none'}" stroke="${element.color}" stroke-width="${element.strokeWidth}" rx="6" />`;
+        }
+        case 'circle': {
+          return `<ellipse cx="${element.x + element.width / 2}" cy="${element.y + element.height / 2}" rx="${Math.abs(element.width) / 2}" ry="${Math.abs(element.height) / 2}" fill="${element.fill || 'none'}" stroke="${element.color}" stroke-width="${element.strokeWidth}" />`;
+        }
+        case 'line': {
+          return `<line x1="${element.x}" y1="${element.y}" x2="${element.x + element.width}" y2="${element.y + element.height}" stroke="${element.color}" stroke-width="${element.strokeWidth}" stroke-linecap="round" />`;
+        }
+        case 'arrow': {
+          const endX = element.x + element.width;
+          const endY = element.y + element.height;
+          const angle = Math.atan2(element.height, element.width);
+          const headLength = 15;
+          const leftHeadX = endX - headLength * Math.cos(angle - Math.PI / 6);
+          const leftHeadY = endY - headLength * Math.sin(angle - Math.PI / 6);
+          const rightHeadX = endX - headLength * Math.cos(angle + Math.PI / 6);
+          const rightHeadY = endY - headLength * Math.sin(angle + Math.PI / 6);
+
+          return `
+            <line x1="${element.x}" y1="${element.y}" x2="${endX}" y2="${endY}" stroke="${element.color}" stroke-width="${element.strokeWidth}" stroke-linecap="round" />
+            <line x1="${endX}" y1="${endY}" x2="${leftHeadX}" y2="${leftHeadY}" stroke="${element.color}" stroke-width="${element.strokeWidth}" stroke-linecap="round" />
+            <line x1="${endX}" y1="${endY}" x2="${rightHeadX}" y2="${rightHeadY}" stroke="${element.color}" stroke-width="${element.strokeWidth}" stroke-linecap="round" />
+          `;
+        }
+        case 'text': {
+          return element.text
+            .split('\n')
+            .map(
+              (line, index) =>
+                `<text x="${element.x}" y="${element.y + element.fontSize + index * getLineHeight(element.fontSize)}" fill="${element.color}" font-size="${element.fontSize}" font-family="sans-serif">${escapeXml(line || ' ')}</text>`,
+            )
+            .join('');
+        }
+        case 'sticky': {
+          const textMarkup = element.text
+            .split('\n')
+            .map(
+              (line, index) =>
+                `<text x="${element.x + 10}" y="${element.y + 25 + index * 20}" fill="#111827" font-size="16" font-family="sans-serif">${escapeXml(line || ' ')}</text>`,
+            )
+            .join('');
+          return `
+            <rect x="${element.x}" y="${element.y}" width="${element.width}" height="${element.height}" fill="${element.color}" stroke="#00000022" stroke-width="1" rx="10" />
+            ${textMarkup}
+          `;
+        }
+        default:
+          return '';
+      }
+    })
+    .join('');
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${BOARD_WIDTH}" height="${BOARD_HEIGHT}" viewBox="0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}" fill="none">
+      ${boardPresentation.defs}
+      ${boardPresentation.markup}
+      ${strokeMarkup}
+      ${elementMarkup}
+    </svg>
+  `.trim();
+}
+
+export function downloadSVG(
+  strokes: DrawStroke[],
+  elements: WhiteboardElement[],
+  filename: string = 'whiteboard',
+  metadata?: Partial<BoardMetadata>,
+): void {
+  const svg = exportToSVG(strokes, elements, metadata);
+  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${filename}.svg`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function copyToClipboard(text: string): Promise<void> {
   return navigator.clipboard.writeText(text);
 }
 
+export function parseShareableLink(search: string): {
+  roomId: string;
+  viewOnly: boolean;
+} {
+  const searchParams = new URLSearchParams(search);
+  const rawRoomId = searchParams.get('room') || '';
+  const [roomId, nestedSearch = ''] = rawRoomId.split('?');
+  const nestedParams = new URLSearchParams(nestedSearch);
+
+  return {
+    roomId,
+    viewOnly:
+      searchParams.get('mode') === 'view' ||
+      nestedParams.get('mode') === 'view',
+  };
+}
+
 export function getShareableLink(roomId: string, viewOnly: boolean = false): string {
-  const baseUrl = window.location.origin;
-  const params = viewOnly ? '?mode=view' : '';
-  return `${baseUrl}?room=${roomId}${params}`;
+  const url = new URL(window.location.origin);
+  url.searchParams.set('room', roomId);
+
+  if (viewOnly) {
+    url.searchParams.set('mode', 'view');
+  }
+
+  return url.toString();
 }

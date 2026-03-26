@@ -61,8 +61,14 @@ app.post('/api/boards', (req, res) => {
 });
 
 app.put('/api/boards/:id', (req, res) => {
-  const { title, name, accessLevel } = req.body;
-  const board = updateBoard(req.params.id, { title, name, accessLevel });
+  const { title, name, accessLevel, roomMode, theme } = req.body;
+  const board = updateBoard(req.params.id, {
+    title,
+    name,
+    accessLevel,
+    roomMode,
+    theme,
+  });
   if (!board) {
     res.status(404).json({ error: 'Board not found' });
     return;

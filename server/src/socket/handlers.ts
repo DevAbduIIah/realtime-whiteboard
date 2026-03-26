@@ -1,6 +1,7 @@
 import { Server, Socket } from 'socket.io';
 import type {
   BoardReaction,
+  BoardMetadata,
   ServerToClientEvents,
   ClientToServerEvents,
   User,
@@ -27,10 +28,24 @@ const ROOM_CLEANUP_DELAY = 5 * 60 * 1000;
 // Debounce save delay
 const SAVE_DELAY = 2000;
 
-function normalizeElement(element: WhiteboardElement): WhiteboardElement {
+function getMaxZIndex(elements: WhiteboardElement[]): number {
+  return elements.reduce(
+    (maxZIndex, element) => Math.max(maxZIndex, element.zIndex ?? 0),
+    0,
+  );
+}
+
+function normalizeElement(
+  element: WhiteboardElement,
+  elements: WhiteboardElement[] = [],
+): WhiteboardElement {
   return {
     ...element,
     version: Math.max(1, element.version ?? 1),
+    zIndex:
+      typeof element.zIndex === 'number'
+        ? element.zIndex
+        : getMaxZIndex(elements) + 1,
   };
 }
 
@@ -48,6 +63,33 @@ function touchRoomMetadata(roomState: ExtendedRoomState): void {
     ...roomState.metadata,
     updatedAt: now,
     revision: roomState.metadata.revision + 1,
+  };
+}
+
+function isRoomReadOnly(roomState: ExtendedRoomState): boolean {
+  return roomState.metadata.roomMode === 'readonly';
+}
+
+function mergeMetadata(
+  currentMetadata: BoardMetadata,
+  updates: Partial<BoardMetadata>,
+): BoardMetadata {
+  return {
+    ...currentMetadata,
+    title: updates.title ?? currentMetadata.title,
+    ownerId: updates.ownerId ?? currentMetadata.ownerId,
+    accessLevel: updates.accessLevel ?? currentMetadata.accessLevel,
+    shareLink: updates.shareLink ?? currentMetadata.shareLink,
+    theme: {
+      ...currentMetadata.theme,
+      ...updates.theme,
+    },
+    roomMode:
+      updates.roomMode === 'readonly'
+        ? 'readonly'
+        : updates.roomMode === 'edit'
+          ? 'edit'
+          : currentMetadata.roomMode,
   };
 }
 
@@ -178,6 +220,10 @@ export function setupSocketHandlers(io: TypedServer): void {
 
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
+      if (isRoomReadOnly(roomState)) {
+        socket.emit('error', 'This board is currently in read-only mode.');
+        return;
+      }
 
       // Prevent duplicate strokes
       if (roomState.strokeIds.has(stroke.id)) {
@@ -201,6 +247,10 @@ export function setupSocketHandlers(io: TypedServer): void {
 
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
+      if (isRoomReadOnly(roomState)) {
+        socket.emit('error', 'This board is currently in read-only mode.');
+        return;
+      }
 
       roomState.strokes = roomState.strokes.filter((stroke) => stroke.id !== strokeId);
       roomState.strokeIds.delete(strokeId);
@@ -217,6 +267,10 @@ export function setupSocketHandlers(io: TypedServer): void {
       if (!user) return;
 
       const roomState = rooms.get(user.roomId);
+      if (roomState && isRoomReadOnly(roomState)) {
+        socket.emit('error', 'This board is currently in read-only mode.');
+        return;
+      }
       if (roomState) {
         roomState.strokes = [];
         roomState.elements = [];
@@ -238,8 +292,12 @@ export function setupSocketHandlers(io: TypedServer): void {
 
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
+      if (isRoomReadOnly(roomState)) {
+        socket.emit('error', 'This board is currently in read-only mode.');
+        return;
+      }
 
-      const normalizedElement = normalizeElement(element);
+      const normalizedElement = normalizeElement(element, roomState.elements);
 
       // Prevent duplicate elements
       if (roomState.elementIds.has(normalizedElement.id)) {
@@ -263,6 +321,10 @@ export function setupSocketHandlers(io: TypedServer): void {
 
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
+      if (isRoomReadOnly(roomState)) {
+        socket.emit('error', 'This board is currently in read-only mode.');
+        return;
+      }
 
       const elementIndex = roomState.elements.findIndex(e => e.id === elementId);
       let appliedUpdates: Partial<WhiteboardElement> | null = null;
@@ -271,7 +333,7 @@ export function setupSocketHandlers(io: TypedServer): void {
         const nextElement = normalizeElement({
           ...currentElement,
           ...updates,
-        } as WhiteboardElement);
+        } as WhiteboardElement, roomState.elements);
 
         if (getElementVersion(nextElement) < getElementVersion(currentElement)) {
           return;
@@ -303,6 +365,10 @@ export function setupSocketHandlers(io: TypedServer): void {
 
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
+      if (isRoomReadOnly(roomState)) {
+        socket.emit('error', 'This board is currently in read-only mode.');
+        return;
+      }
 
       roomState.elements = roomState.elements.filter(e => e.id !== elementId);
       roomState.elementIds.delete(elementId);
@@ -321,6 +387,10 @@ export function setupSocketHandlers(io: TypedServer): void {
 
       const roomState = rooms.get(user.roomId);
       if (!roomState) return;
+      if (isRoomReadOnly(roomState)) {
+        socket.emit('error', 'This board is currently in read-only mode.');
+        return;
+      }
 
       roomState.strokes = strokes;
       roomState.elements = normalizeElements(elements);
@@ -335,6 +405,21 @@ export function setupSocketHandlers(io: TypedServer): void {
         strokes,
         elements: roomState.elements,
       });
+    });
+
+    socket.on('board:metadata-update', ({ updates }) => {
+      const user = userSockets.get(socket.id);
+      if (!user) return;
+
+      const roomState = rooms.get(user.roomId);
+      if (!roomState) return;
+
+      roomState.metadata = mergeMetadata(roomState.metadata, updates);
+      touchRoomMetadata(roomState);
+      roomState.lastActivity = Date.now();
+      saveRoomToStorage(user.roomId, roomState);
+
+      io.to(user.roomId).emit('board:metadata-updated', roomState.metadata);
     });
 
     socket.on('cursor:move', ({ x, y, status }) => {

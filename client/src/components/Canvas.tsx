@@ -10,6 +10,12 @@ import {
 import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
 import { getUserColor } from "../utils/userColors";
 import {
+  BOARD_HEIGHT,
+  BOARD_WIDTH,
+  drawBoardPresentation,
+  getBoardSurfaceStyle,
+} from "../utils/boardPresentation";
+import {
   boundsIntersect,
   cloneElementWithOffset,
   getElementBounds,
@@ -22,6 +28,7 @@ import {
   translateElement,
 } from "../utils/elementGeometry";
 import type {
+  BoardMetadata,
   BoardReaction,
   CursorPosition,
   DrawStroke,
@@ -42,10 +49,12 @@ interface MutationOptions {
 }
 
 interface CanvasProps {
+  metadata: BoardMetadata;
   strokes: DrawStroke[];
   elements: WhiteboardElement[];
   drawingState: DrawingState;
   userId: string;
+  readOnly?: boolean;
   onStrokeComplete: (stroke: DrawStroke, options?: MutationOptions) => void;
   onElementAdd: (
     element: WhiteboardElement,
@@ -66,6 +75,7 @@ interface CanvasProps {
   onReactionAdd?: (reaction: BoardReaction) => void;
   followCursor?: CursorPosition | null;
   followUserName?: string | null;
+  onSelectionChange?: (elements: WhiteboardElement[]) => void;
 }
 
 export interface CanvasHandle {
@@ -115,8 +125,8 @@ type SelectionInteraction =
       initialSelectionIds: string[];
     };
 
-const CANVAS_WIDTH = 1920;
-const CANVAS_HEIGHT = 1080;
+const CANVAS_WIDTH = BOARD_WIDTH;
+const CANVAS_HEIGHT = BOARD_HEIGHT;
 const LIVE_UPDATE_DELAY = 40;
 const PASTE_OFFSET = 24;
 const ERASABLE_SHAPE_TYPES = new Set(["rectangle", "circle", "line", "arrow"]);
@@ -181,6 +191,13 @@ function mergeBounds(bounds: Bounds[]): Bounds | null {
       bottom: Math.max(accumulator.bottom, bound.bottom),
     }),
     bounds[0],
+  );
+}
+
+function getMaxZIndex(elements: WhiteboardElement[]): number {
+  return elements.reduce(
+    (maxZIndex, element) => Math.max(maxZIndex, element.zIndex ?? 0),
+    0,
   );
 }
 
@@ -577,10 +594,12 @@ function buildElementMap(
 
 export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   {
+    metadata,
     strokes,
     elements,
     drawingState,
     userId,
+    readOnly = false,
     onStrokeComplete,
     onElementAdd,
     onElementUpdate,
@@ -595,6 +614,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     onReactionAdd,
     followCursor = null,
     followUserName = null,
+    onSelectionChange,
   },
   ref,
 ) {
@@ -705,7 +725,17 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
   const resolvedElements = useMemo(
     () =>
-      elements.map((element) => liveElementOverrides[element.id] ?? element),
+      elements
+        .map((element, index) => ({
+          element: liveElementOverrides[element.id] ?? element,
+          index,
+        }))
+        .sort((left, right) => {
+          const zIndexDelta =
+            (left.element.zIndex ?? 0) - (right.element.zIndex ?? 0);
+          return zIndexDelta !== 0 ? zIndexDelta : left.index - right.index;
+        })
+        .map(({ element }) => element),
     [elements, liveElementOverrides],
   );
 
@@ -724,6 +754,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
   const singleSelectedElement =
     selectedElements.length === 1 ? selectedElements[0] : null;
+  const nextElementZIndex = useMemo(
+    () => getMaxZIndex(resolvedElements) + 1,
+    [resolvedElements],
+  );
   const selectionBounds = useMemo(
     () => getSelectionBounds(selectedElements),
     [selectedElements],
@@ -916,19 +950,24 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
   const pasteElements = useCallback(
     (sourceElements: WhiteboardElement[]) => {
+      if (readOnly) {
+        return false;
+      }
+
       if (sourceElements.length === 0) {
         return false;
       }
 
-      const duplicatedElements = sourceElements.map((element) =>
-        cloneElementWithOffset(
+      const duplicatedElements = sourceElements.map((element, index) => ({
+        ...cloneElementWithOffset(
           element,
           generateId(),
           PASTE_OFFSET,
           PASTE_OFFSET,
           userId,
         ),
-      );
+        zIndex: nextElementZIndex + index,
+      }));
 
       duplicatedElements.forEach((element) => {
         onElementAdd(element);
@@ -941,7 +980,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
       return true;
     },
-    [onElementAdd, userId],
+    [nextElementZIndex, onElementAdd, readOnly, userId],
   );
 
   const pasteClipboard = useCallback(() => {
@@ -953,6 +992,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   }, [pasteElements, selectedElements]);
 
   const deleteSelection = useCallback(() => {
+    if (readOnly) {
+      return false;
+    }
+
     if (selectedElementIds.length === 0) {
       return false;
     }
@@ -966,6 +1009,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   }, [
     clearSelection,
     onElementDelete,
+    readOnly,
     selectedElementIds,
   ]);
 
@@ -1101,6 +1145,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   }, [elements]);
 
   useEffect(() => {
+    onSelectionChange?.(selectedElements);
+  }, [onSelectionChange, selectedElements]);
+
+  useEffect(() => {
     if (!isSelectTool) {
       clearSelection();
     }
@@ -1178,8 +1226,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
         return;
       }
 
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, targetCanvas.width, targetCanvas.height);
+      drawBoardPresentation(ctx, targetCanvas.width, targetCanvas.height, metadata);
       strokes.forEach((stroke) => drawStrokePath(ctx, stroke));
 
       const allElements =
@@ -1309,7 +1356,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
         drawSelectionOverlay(ctx);
       }
     },
-    [drawSelectionOverlay, previewShape, resolvedElements, strokes],
+    [drawSelectionOverlay, metadata, previewShape, resolvedElements, strokes],
   );
 
   const drawElements = useCallback(() => {
@@ -1389,9 +1436,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }, [canvasRef]);
+    drawBoardPresentation(ctx, canvas.width, canvas.height, metadata);
+  }, [canvasRef, metadata]);
 
   const handleSelectMouseDown = useCallback(
     (point: Point, shiftKey: boolean) => {
@@ -1540,6 +1586,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       return;
     }
 
+    if (readOnly) {
+      return;
+    }
+
     if (isTextTool) {
       setTextInput({ x: point.x, y: point.y, visible: true });
       setTextValue("");
@@ -1561,6 +1611,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
         type: "sticky",
         x: point.x,
         y: point.y,
+        zIndex: nextElementZIndex,
         width: 200,
         height: 150,
         text: "Click to edit...",
@@ -1688,6 +1739,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
               type: drawingState.tool,
               x: shapeStart.x,
               y: shapeStart.y,
+              zIndex: nextElementZIndex,
               width: deltaX,
               height: deltaY,
               color: drawingState.color,
@@ -1700,6 +1752,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
               type: drawingState.tool as "rectangle" | "circle",
               x: Math.min(shapeStart.x, point.x),
               y: Math.min(shapeStart.y, point.y),
+              zIndex: nextElementZIndex,
               width: Math.abs(deltaX),
               height: Math.abs(deltaY),
               color: drawingState.color,
@@ -1786,6 +1839,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
         type: "text",
         x: textInput.x,
         y: textInput.y,
+        zIndex: nextElementZIndex,
         text: textValue,
         fontSize: 24,
         color: drawingState.color,
@@ -1818,6 +1872,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       return "crosshair";
     }
 
+    if (readOnly && drawingState.tool !== "select") {
+      return "not-allowed";
+    }
+
     switch (drawingState.tool) {
       case "select":
         return selectedElementIds.length > 0 ? "move" : "default";
@@ -1835,10 +1893,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       ref={containerRef}
       className="relative flex-1 h-full overflow-hidden rounded-xl shadow-inner"
       style={{
-        background: "#f9fafb",
-        backgroundImage:
-          "radial-gradient(circle, #e5e7eb 1px, transparent 1px)",
-        backgroundSize: "20px 20px",
+        backgroundColor: getBoardSurfaceStyle(metadata.theme.background).backgroundColor,
       }}
       onMouseDown={handleContainerMouseDown}
       onWheel={handleContainerWheel}

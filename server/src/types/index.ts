@@ -25,6 +25,7 @@ export interface TextElement {
   type: 'text';
   x: number;
   y: number;
+  zIndex: number;
   text: string;
   fontSize: number;
   color: string;
@@ -37,6 +38,7 @@ export interface StickyElement {
   type: 'sticky';
   x: number;
   y: number;
+  zIndex: number;
   width: number;
   height: number;
   text: string;
@@ -50,6 +52,7 @@ export interface ShapeElement {
   type: 'rectangle' | 'circle' | 'line' | 'arrow';
   x: number;
   y: number;
+  zIndex: number;
   width: number;
   height: number;
   color: string;
@@ -81,6 +84,15 @@ export interface User {
   lastActiveAt: number;
 }
 
+export type BoardBackground = 'dots' | 'grid' | 'plain' | 'blueprint' | 'warm';
+export type BoardTemplate = 'blank' | 'kanban' | 'retrospective';
+export type RoomMode = 'edit' | 'readonly';
+
+export interface BoardTheme {
+  background: BoardBackground;
+  template: BoardTemplate;
+}
+
 export interface BoardMetadata {
   id: string;
   title: string;
@@ -90,6 +102,8 @@ export interface BoardMetadata {
   ownerId?: string;
   accessLevel: 'public' | 'private';
   shareLink?: string;
+  roomMode: RoomMode;
+  theme: BoardTheme;
 }
 
 export interface BoardSnapshot {
@@ -165,6 +179,10 @@ export interface BoardStatePayload {
   elements: WhiteboardElement[];
 }
 
+export interface MetadataUpdatePayload {
+  updates: Partial<BoardMetadata>;
+}
+
 export interface ServerToClientEvents {
   'room:joined': (data: { user: User; roomState: RoomState }) => void;
   'room:user-joined': (user: User) => void;
@@ -177,6 +195,7 @@ export interface ServerToClientEvents {
   'element:update': (data: { elementId: string; updates: Partial<WhiteboardElement> }) => void;
   'element:delete': (elementId: string) => void;
   'board:replace': (payload: BoardStatePayload) => void;
+  'board:metadata-updated': (metadata: BoardMetadata) => void;
   'cursor:update': (cursor: CursorPosition) => void;
   'cursor:remove': (userId: string) => void;
   'reaction:add': (reaction: BoardReaction) => void;
@@ -193,6 +212,7 @@ export interface ClientToServerEvents {
   'element:update': (payload: ElementUpdatePayload) => void;
   'element:delete': (payload: ElementDeletePayload) => void;
   'board:replace': (payload: BoardStatePayload) => void;
+  'board:metadata-update': (payload: MetadataUpdatePayload) => void;
   'cursor:move': (payload: CursorPayload) => void;
   'reaction:add': (payload: ReactionPayload) => void;
 }

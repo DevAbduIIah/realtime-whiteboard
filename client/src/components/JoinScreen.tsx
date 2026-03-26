@@ -1,10 +1,19 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSocket } from "../contexts/SocketContext";
+import { parseShareableLink } from "../utils/export";
 
 export function JoinScreen() {
-  const { joinRoom, isConnected } = useSocket();
+  const { joinRoom, isConnected, isJoiningRoom, lastError } = useSocket();
+  const shareLinkState = useMemo(
+    () =>
+      typeof window === "undefined"
+        ? { roomId: "", viewOnly: false }
+        : parseShareableLink(window.location.search),
+    [],
+  );
   const [userName, setUserName] = useState("");
-  const [roomId, setRoomId] = useState("");
+  const [roomId, setRoomId] = useState(shareLinkState.roomId || "");
+  const isViewOnlyLink = shareLinkState.viewOnly;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,9 +50,23 @@ export function JoinScreen() {
             Collaborative Whiteboard
           </h1>
           <p className="text-gray-500 mt-2">
-            Draw together in real-time with others
+            {isViewOnlyLink
+              ? "Open a live board in view-only mode"
+              : "Draw together in real-time with others"}
           </p>
         </div>
+
+        {isViewOnlyLink && (
+          <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            This link opens the board in read-only mode on your device. You can still join the room, watch updates, and export the board.
+          </div>
+        )}
+
+        {lastError && (
+          <div className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {lastError}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
@@ -98,10 +121,18 @@ export function JoinScreen() {
 
           <button
             type="submit"
-            disabled={!isConnected || !userName.trim() || !roomId.trim()}
+            disabled={
+              !isConnected || isJoiningRoom || !userName.trim() || !roomId.trim()
+            }
             className="w-full py-3 bg-primary-500 text-white rounded-lg font-medium hover:bg-primary-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
           >
-            {isConnected ? "Join Room" : "Connecting..."}
+            {isJoiningRoom
+              ? "Joining..."
+              : isConnected
+                ? isViewOnlyLink
+                  ? "Join as Viewer"
+                  : "Join Room"
+                : "Connecting..."}
           </button>
         </form>
 

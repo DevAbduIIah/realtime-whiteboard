@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import type {
+  BoardMetadata,
   BoardReaction,
   DrawStroke,
   CursorPosition,
@@ -22,6 +23,10 @@ interface ReactionPayload {
   reaction: BoardReaction;
 }
 
+interface MetadataUpdatePayload {
+  updates: Partial<BoardMetadata>;
+}
+
 interface ServerToClientEvents {
   'room:joined': (data: { user: User; roomState: RoomState }) => void;
   'room:user-joined': (user: User) => void;
@@ -34,6 +39,7 @@ interface ServerToClientEvents {
   'element:update': (data: { elementId: string; updates: Partial<WhiteboardElement> }) => void;
   'element:delete': (elementId: string) => void;
   'board:replace': (payload: BoardStatePayload) => void;
+  'board:metadata-updated': (metadata: BoardMetadata) => void;
   'cursor:update': (cursor: CursorPosition) => void;
   'cursor:remove': (userId: string) => void;
   'reaction:add': (reaction: BoardReaction) => void;
@@ -50,6 +56,7 @@ interface ClientToServerEvents {
   'element:update': (payload: { elementId: string; updates: Partial<WhiteboardElement> }) => void;
   'element:delete': (payload: { elementId: string }) => void;
   'board:replace': (payload: BoardStatePayload) => void;
+  'board:metadata-update': (payload: MetadataUpdatePayload) => void;
   'cursor:move': (payload: { x: number; y: number; status?: PresenceStatus }) => void;
   'reaction:add': (payload: ReactionPayload) => void;
 }

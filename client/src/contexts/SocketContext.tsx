@@ -15,6 +15,7 @@ import {
 } from "../utils/socket";
 import { getOrCreateClientId } from "../utils/presence";
 import type {
+  BoardMetadata,
   BoardReaction,
   User,
   RoomState,
@@ -50,9 +51,11 @@ interface SocketContextValue {
   socket: TypedSocket;
   isConnected: boolean;
   isReconnecting: boolean;
+  isJoiningRoom: boolean;
   connectionStatus: "connected" | "disconnected" | "reconnecting";
   reconnectAttempt: number;
   lastRejoinedAt: number | null;
+  lastError: string | null;
   currentUser: User | null;
   roomState: RoomState | null;
   cursors: Map<string, CursorPosition>;
@@ -70,6 +73,7 @@ interface SocketContextValue {
     elementId: string,
     updates: Partial<WhiteboardElement>,
   ) => void;
+  updateBoardMetadata: (updates: Partial<BoardMetadata>) => void;
   deleteElement: (elementId: string, options?: MutationOptions) => void;
   captureHistorySnapshot: () => void;
   commitCapturedHistory: () => void;
@@ -97,6 +101,7 @@ function normalizeElement<T extends WhiteboardElement>(element: T): T {
   return {
     ...element,
     version: Math.max(1, element.version ?? 1),
+    zIndex: typeof element.zIndex === "number" ? element.zIndex : 0,
   };
 }
 
@@ -123,6 +128,17 @@ function applyElementUpdates(
     ...currentElement,
     ...updates,
   } as WhiteboardElement);
+}
+
+function getMaxZIndex(elements: WhiteboardElement[]): number {
+  return elements.reduce(
+    (maxZIndex, element) => Math.max(maxZIndex, element.zIndex ?? 0),
+    0,
+  );
+}
+
+function isReadOnlyMetadata(metadata?: BoardMetadata | null): boolean {
+  return metadata?.roomMode === "readonly";
 }
 
 function bumpMetadata<T extends RoomState>(roomState: T): T {
@@ -155,11 +171,13 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const [socket] = useState(() => getSocket());
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [isJoiningRoom, setIsJoiningRoom] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<
     "connected" | "disconnected" | "reconnecting"
   >("disconnected");
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [lastRejoinedAt, setLastRejoinedAt] = useState<number | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [cursors, setCursors] = useState<Map<string, CursorPosition>>(
@@ -401,6 +419,18 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const setBoardMetadataLocal = useCallback((metadata: BoardMetadata) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      const nextState = {
+        ...prev,
+        metadata,
+      };
+      roomStateRef.current = nextState;
+      return nextState;
+    });
+  }, []);
+
   const removeUserLocal = useCallback((userId: string) => {
     setRoomState((prev) => {
       if (!prev) return prev;
@@ -540,6 +570,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     function onConnect() {
       setIsConnected(true);
+      setLastError(null);
 
       if (lastRoomInfoRef.current) {
         setIsReconnecting(true);
@@ -571,6 +602,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setConnectionStatus("disconnected");
     }
 
+    function onConnectError(error: Error) {
+      setIsJoiningRoom(false);
+      setLastError(error.message || "Unable to reach the whiteboard server.");
+    }
+
     function onReconnectAttempt(attempt: number) {
       setIsReconnecting(true);
       setConnectionStatus("reconnecting");
@@ -596,9 +632,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setRoomState(normalizedRoomState);
       roomStateRef.current = normalizedRoomState;
       setReactions([]);
+      setIsJoiningRoom(false);
       setIsReconnecting(false);
       setConnectionStatus("connected");
       setReconnectAttempt(0);
+      setLastError(null);
 
       if (didRejoin) {
         setLastRejoinedAt(Date.now());
@@ -736,7 +774,17 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       addReactionLocal(reaction);
     }
 
+    function onBoardMetadataUpdated(metadata: BoardMetadata) {
+      setBoardMetadataLocal(metadata);
+    }
+
+    function onError(message: string) {
+      setLastError(message);
+      setIsJoiningRoom(false);
+    }
+
     socket.on("connect", onConnect);
+    socket.on("connect_error", onConnectError);
     socket.on("disconnect", onDisconnect);
     socket.io.on("reconnect_attempt", onReconnectAttempt);
     socket.io.on("reconnect_failed", onReconnectFailed);
@@ -751,12 +799,15 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     socket.on("element:update", onElementUpdate);
     socket.on("element:delete", onElementDelete);
     socket.on("board:replace", onBoardReplace);
+    socket.on("board:metadata-updated", onBoardMetadataUpdated);
     socket.on("cursor:update", onCursorUpdate);
     socket.on("cursor:remove", onCursorRemove);
     socket.on("reaction:add", onReactionAdd);
+    socket.on("error", onError);
 
     return () => {
       socket.off("connect", onConnect);
+      socket.off("connect_error", onConnectError);
       socket.off("disconnect", onDisconnect);
       socket.io.off("reconnect_attempt", onReconnectAttempt);
       socket.io.off("reconnect_failed", onReconnectFailed);
@@ -771,9 +822,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       socket.off("element:update", onElementUpdate);
       socket.off("element:delete", onElementDelete);
       socket.off("board:replace", onBoardReplace);
+      socket.off("board:metadata-updated", onBoardMetadataUpdated);
       socket.off("cursor:update", onCursorUpdate);
       socket.off("cursor:remove", onCursorRemove);
       socket.off("reaction:add", onReactionAdd);
+      socket.off("error", onError);
       disconnectSocket();
     };
   }, [
@@ -785,6 +838,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     removeUserLocal,
     resetHistory,
     scheduleCursorFlush,
+    setBoardMetadataLocal,
     setElementLocal,
     setUserLocal,
     socket,
@@ -793,6 +847,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const joinRoom = useCallback(
     (roomId: string, userName: string) => {
       lastRoomInfoRef.current = { roomId, userName };
+      setIsJoiningRoom(true);
+      setLastError(null);
       socket.emit("room:join", { roomId, userName, clientId: clientIdRef.current });
     },
     [socket],
@@ -812,6 +868,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     awaitingRoomRejoinRef.current = false;
     setReconnectAttempt(0);
     setLastRejoinedAt(null);
+    setIsJoiningRoom(false);
+    setLastError(null);
     currentUserRef.current = null;
     setCurrentUser(null);
     setRoomState(null);
@@ -822,6 +880,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   const sendStroke = useCallback(
     (stroke: DrawStroke, options?: MutationOptions) => {
+      if (isReadOnlyMetadata(roomStateRef.current?.metadata)) {
+        setLastError("This board is currently in read-only mode.");
+        return;
+      }
+
       const nextStroke = cloneStroke(stroke);
       addStrokeLocal(nextStroke);
       emitStrokeAdd(nextStroke);
@@ -839,6 +902,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const sendClear = useCallback(() => {
     const currentState = roomStateRef.current;
     if (!currentState) return;
+    if (isReadOnlyMetadata(currentState.metadata)) {
+      setLastError("This board is currently in read-only mode.");
+      return;
+    }
 
     const clearedStrokes = currentState.strokes.map(cloneStroke);
     const clearedElements = (currentState.elements || []).map(cloneElement);
@@ -903,7 +970,19 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   const sendElement = useCallback(
     (element: WhiteboardElement, options?: MutationOptions) => {
-      const nextElement = normalizeElement(cloneElement(element));
+      const currentState = roomStateRef.current;
+      if (isReadOnlyMetadata(currentState?.metadata)) {
+        setLastError("This board is currently in read-only mode.");
+        return;
+      }
+
+      const nextElement = normalizeElement({
+        ...cloneElement(element),
+        zIndex:
+          typeof element.zIndex === "number"
+            ? element.zIndex
+            : getMaxZIndex(currentState?.elements || []) + 1,
+      } as WhiteboardElement);
       addElementLocal(nextElement);
       emitElementAdd(nextElement);
 
@@ -920,6 +999,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const updateElement = useCallback(
     (elementId: string, updates: Partial<WhiteboardElement>) => {
       const currentState = roomStateRef.current;
+      if (isReadOnlyMetadata(currentState?.metadata)) {
+        setLastError("This board is currently in read-only mode.");
+        return;
+      }
+
       const currentElement = currentState?.elements.find(
         (element) => element.id === elementId,
       );
@@ -954,9 +1038,36 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     [emitElementSet, pushHistoryEntry, setElementLocal],
   );
 
+  const updateBoardMetadata = useCallback(
+    (updates: Partial<BoardMetadata>) => {
+      const currentState = roomStateRef.current;
+      if (!currentState) {
+        return;
+      }
+
+      const nextMetadata: BoardMetadata = {
+        ...currentState.metadata,
+        ...updates,
+        theme: {
+          ...currentState.metadata.theme,
+          ...updates.theme,
+        },
+      };
+
+      setBoardMetadataLocal(nextMetadata);
+      socket.emit("board:metadata-update", { updates });
+    },
+    [setBoardMetadataLocal, socket],
+  );
+
   const deleteElement = useCallback(
     (elementId: string, options?: MutationOptions) => {
       const currentState = roomStateRef.current;
+      if (isReadOnlyMetadata(currentState?.metadata)) {
+        setLastError("This board is currently in read-only mode.");
+        return;
+      }
+
       const element = currentState?.elements.find(
         (existingElement) => existingElement.id === elementId,
       );
@@ -1041,9 +1152,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         socket,
         isConnected,
         isReconnecting,
+        isJoiningRoom,
         connectionStatus,
         reconnectAttempt,
         lastRejoinedAt,
+        lastError,
         currentUser,
         roomState,
         cursors,
@@ -1058,6 +1171,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         sendReaction,
         sendElement,
         updateElement,
+        updateBoardMetadata,
         deleteElement,
         captureHistorySnapshot,
         commitCapturedHistory,
