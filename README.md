@@ -1,6 +1,6 @@
 # Real-Time Collaborative Whiteboard
 
-A portfolio-quality collaborative whiteboard built with React, TypeScript, Socket.IO, and the HTML5 Canvas API. Multiple users can join the same room, draw live, manipulate elements, navigate large boards, share links, and work with persistent board state.
+A collaborative whiteboard built with React, TypeScript, Socket.IO, and the HTML5 Canvas API. Multiple users can join the same room, draw live, manipulate elements, navigate large boards, share links, and work with persistent board state.
 
 ## Highlights
 
